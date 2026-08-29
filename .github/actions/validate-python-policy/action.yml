@@ -1,0 +1,9 @@
+name: Validate shared Python policy
+description: Enforce GrooveMap's canonical pyproject toolchain, rules, and section ordering.
+
+runs:
+  using: composite
+  steps:
+    - name: Validate pyproject policy
+      shell: bash
+      run: python3 "${{ github.action_path }}/validate.py" "${GITHUB_WORKSPACE}"

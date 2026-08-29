@@ -1,0 +1,331 @@
+name: Reusable CI
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted runner label.
+        required: false
+        default: ubuntu-24.04
+        type: string
+      language:
+        description: Primary caller ecosystem (python, rust, node, or mixed).
+        required: true
+        type: string
+      setup-command:
+        description: Locked dependency installation command.
+        required: true
+        type: string
+      check-command:
+        description: Authoritative format, lint, type, test, and contract gate.
+        required: true
+        type: string
+      coverage-command:
+        description: Generate the declared XML or LCOV coverage evidence.
+        required: true
+        type: string
+      audit-command:
+        description: Locked dependency vulnerability audit.
+        required: true
+        type: string
+      license-command:
+        description: Locked dependency license inventory and policy gate.
+        required: true
+        type: string
+      secret-scan-command:
+        description: Repository and history secret scan.
+        required: true
+        type: string
+      package-command:
+        description: Build the repository's distributable package or application artifact.
+        required: true
+        type: string
+      install-command:
+        description: Install and smoke-test the built package or application artifact.
+        required: true
+        type: string
+      image-command:
+        description: Local container build and metadata/runtime inspection command.
+        required: false
+        default: ""
+        type: string
+      integration-command:
+        description: Optional service-backed contract or integration test command.
+        required: false
+        default: ""
+        type: string
+      e2e-setup-command:
+        description: Optional browser dependency setup command.
+        required: false
+        default: ""
+        type: string
+      e2e-instrument-command:
+        description: Optional browser JavaScript instrumentation command.
+        required: false
+        default: ""
+        type: string
+      e2e-command:
+        description: Optional browser end-to-end test command.
+        required: false
+        default: ""
+        type: string
+      e2e-post-command:
+        description: Required always-run post-processing and teardown when E2E is enabled.
+        required: false
+        default: ""
+        type: string
+      coverage-files:
+        description: Newline-separated coverage report paths or glob patterns.
+        required: true
+        type: string
+      coverage-flags:
+        description: Codecov flags for the caller repository.
+        required: false
+        default: unit
+        type: string
+      upload-codecov:
+        description: Also send coverage to Codecov; artifact retention always remains enabled.
+        required: false
+        default: false
+        type: boolean
+      requires-private-library:
+        description: Whether the complete gate needs the private python-libraries repository.
+        required: false
+        default: false
+        type: boolean
+      private-library-client-id:
+        description: GitHub App client ID supplied explicitly by the caller when private access is required.
+        required: false
+        default: ""
+        type: string
+      private-library-revision:
+        description: Full commit revision of python-libraries required by the caller.
+        required: false
+        default: ""
+        type: string
+    secrets:
+      PRIVATE_LIBRARY_PRIVATE_KEY:
+        description: GitHub App private key with read-only access to python-libraries.
+        required: false
+      CODECOV_TOKEN:
+        description: Optional Codecov upload token.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Required validation
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up pinned repository tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install: true
+          cache: true
+
+      - name: Validate interface and fail closed
+        shell: bash
+        env:
+          LANGUAGE: ${{ inputs.language }}
+          SETUP_COMMAND: ${{ inputs.setup-command }}
+          CHECK_COMMAND: ${{ inputs.check-command }}
+          COVERAGE_COMMAND: ${{ inputs.coverage-command }}
+          AUDIT_COMMAND: ${{ inputs.audit-command }}
+          LICENSE_COMMAND: ${{ inputs.license-command }}
+          SECRET_SCAN_COMMAND: ${{ inputs.secret-scan-command }}
+          PACKAGE_COMMAND: ${{ inputs.package-command }}
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          COVERAGE_FILES: ${{ inputs.coverage-files }}
+          E2E_SETUP_COMMAND: ${{ inputs.e2e-setup-command }}
+          E2E_INSTRUMENT_COMMAND: ${{ inputs.e2e-instrument-command }}
+          E2E_COMMAND: ${{ inputs.e2e-command }}
+          E2E_POST_COMMAND: ${{ inputs.e2e-post-command }}
+          REQUIRES_PRIVATE_LIBRARY: ${{ inputs.requires-private-library }}
+          PRIVATE_LIBRARY_CLIENT_ID: ${{ inputs.private-library-client-id }}
+          PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.PRIVATE_LIBRARY_PRIVATE_KEY }}
+          PRIVATE_LIBRARY_REVISION: ${{ inputs.private-library-revision }}
+        run: |
+          case "${LANGUAGE}" in
+            python) test -f pyproject.toml ;;
+            rust) test -f Cargo.toml ;;
+            node) test -f package.json ;;
+            mixed) ;;
+            *) echo "::error::language must be python, rust, node, or mixed"; exit 1 ;;
+          esac
+
+          for value in \
+            "${SETUP_COMMAND}" \
+            "${CHECK_COMMAND}" \
+            "${COVERAGE_COMMAND}" \
+            "${AUDIT_COMMAND}" \
+            "${LICENSE_COMMAND}" \
+            "${SECRET_SCAN_COMMAND}" \
+            "${PACKAGE_COMMAND}" \
+            "${INSTALL_COMMAND}" \
+            "${COVERAGE_FILES}"; do
+            if [[ -z "${value//[[:space:]]/}" ]]; then
+              echo "::error::required validation inputs must not be blank"
+              exit 1
+            fi
+          done
+
+          if [[ -n "${E2E_SETUP_COMMAND}${E2E_INSTRUMENT_COMMAND}${E2E_POST_COMMAND}" && -z "${E2E_COMMAND}" ]]; then
+            echo "::error::e2e-command is required when any E2E lifecycle input is configured"
+            exit 1
+          fi
+          if [[ -n "${E2E_COMMAND}" && -z "${E2E_POST_COMMAND}" ]]; then
+            echo "::error::e2e-post-command is required so post-processing and teardown always run"
+            exit 1
+          fi
+
+          if [[ "${REQUIRES_PRIVATE_LIBRARY}" == "true" ]]; then
+            if [[ ! "${PRIVATE_LIBRARY_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::private-library-revision must be a full lowercase commit SHA"
+              exit 1
+            fi
+            if [[ -z "${PRIVATE_LIBRARY_CLIENT_ID}" || -z "${PRIVATE_LIBRARY_PRIVATE_KEY}" ]]; then
+              echo "::error::private-library GitHub App credentials are required; no reduced gate is available"
+              exit 1
+            fi
+          fi
+
+      - name: Mint private-library token
+        id: app-token
+        if: inputs.requires-private-library
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.private-library-client-id }}
+          private-key: ${{ secrets.PRIVATE_LIBRARY_PRIVATE_KEY }}
+          owner: groovemap-music
+          repositories: python-libraries
+
+      - name: Check out pinned private library
+        if: inputs.requires-private-library
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: groovemap-music/python-libraries
+          ref: ${{ inputs.private-library-revision }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: python-libraries
+
+      - name: Authorize private Git dependencies
+        if: inputs.requires-private-library
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${APP_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GROOVEMAP_RUNTIME_REPO=${GITHUB_WORKSPACE}/python-libraries" >> "${GITHUB_ENV}"
+          echo "GROOVEMAP_LIBRARIES_REPO=${GITHUB_WORKSPACE}/python-libraries" >> "${GITHUB_ENV}"
+
+      - name: Verify Beadhive-compatible command interface
+        shell: bash
+        run: just --list
+
+      - name: Install locked dependencies
+        shell: bash
+        run: ${{ inputs.setup-command }}
+
+      - name: Run format, lint, type, test, and contract checks
+        shell: bash
+        run: ${{ inputs.check-command }}
+
+      - name: Generate coverage evidence
+        shell: bash
+        run: ${{ inputs.coverage-command }}
+
+      - name: Run dependency audit
+        shell: bash
+        run: ${{ inputs.audit-command }}
+
+      - name: Validate locked dependency licenses
+        shell: bash
+        run: ${{ inputs.license-command }}
+
+      - name: Scan repository and history for secrets
+        shell: bash
+        run: ${{ inputs.secret-scan-command }}
+
+      - name: Build package or application artifact
+        shell: bash
+        run: ${{ inputs.package-command }}
+
+      - name: Install and smoke-test built artifact
+        shell: bash
+        run: ${{ inputs.install-command }}
+
+      - name: Install browser dependencies
+        if: inputs.e2e-command != '' && inputs.e2e-setup-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-setup-command }}
+
+      - name: Instrument browser JavaScript
+        if: inputs.e2e-command != '' && inputs.e2e-instrument-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-instrument-command }}
+
+      - name: Run browser end-to-end tests
+        if: inputs.e2e-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-command }}
+
+      - name: Run service-backed contract and integration checks
+        if: inputs.integration-command != ''
+        shell: bash
+        run: ${{ inputs.integration-command }}
+
+      - name: Run E2E post-processing and teardown
+        if: always() && inputs.e2e-post-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-post-command }}
+
+      - name: Build and inspect local container
+        if: inputs.image-command != ''
+        shell: bash
+        run: ${{ inputs.image-command }}
+
+      - name: Retain coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ github.event.repository.name }}-coverage-${{ github.run_id }}
+          path: ${{ inputs.coverage-files }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload coverage to Codecov
+        if: always() && inputs.upload-codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.coverage-files }}
+          flags: ${{ inputs.coverage-flags }}
+          fail_ci_if_error: true
+
+      - name: Remove private Git credentials
+        if: always() && inputs.requires-private-library
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: git config --global --remove-section "url.https://x-access-token:${APP_TOKEN}@github.com/" || true
+
+  result:
+    name: Required result
+    if: always()
+    needs: validate
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Enforce complete validation result
+        shell: bash
+        env:
+          VALIDATION_RESULT: ${{ needs.validate.result }}
+        run: test "${VALIDATION_RESULT}" = success

@@ -1,12 +1,10 @@
 # GrooveMap automation
 
-`automation` is the public source of reusable GitHub Actions workflows and composite actions
-for GrooveMap repositories. It provides versioned automation interfaces that callers consume at
-immutable full commit revisions.
-
-The repository begins with its public governance and validation boundary. Reusable workflow and
-action implementations are added in separately reviewed changes so their permissions, inputs,
-outputs, and failure behavior can be tested independently.
+`automation` is the public source of reusable GitHub Actions workflows and composite actions for
+GrooveMap repositories. It provides a complete pull-request gate for Python, Rust, Node, mixed,
+container, coverage, security, package, and install checks, plus an attested tag-release path.
+Callers select their repository-owned commands and consume these interfaces at immutable full
+commit revisions.
 
 ## Development
 
@@ -17,11 +15,11 @@ mise install
 just check
 ```
 
-`just check` uses only Node.js standard-library APIs. It validates syntax, runs behavior tests,
-checks Markdown links, verifies legal and governance files, enforces immutable action references,
-checks Dependabot coverage, and scans the current tree for common private-material patterns. It
-does not access organization secrets, call GitHub APIs, publish artifacts, or change external
-state.
+`just check` uses only Node.js and Python standard-library APIs. It validates syntax, runs behavior
+tests, checks Markdown links, verifies legal and governance files, enforces immutable action
+references, checks Dependabot coverage, and scans the current tree for common private-material
+patterns. It does not access organization secrets, call GitHub APIs, publish artifacts, or change
+external state.
 
 ## Repository boundary
 
@@ -39,8 +37,9 @@ artifacts belong here. Examples and fixtures must use reserved synthetic values.
 ## Documentation
 
 See the [documentation index](docs/README.md) for the architecture, governance boundary, and
-local validation contract. Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change and
-[SECURITY.md](SECURITY.md) before reporting a vulnerability.
+local validation contract. The [interface guide](docs/interfaces.md) documents every reusable
+input, failure mode, permission, and release invariant. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+before proposing a change and [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 ## License
 

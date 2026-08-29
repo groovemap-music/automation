@@ -1,0 +1,311 @@
+name: Reusable tag release
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted runner label.
+        required: false
+        default: ubuntu-24.04
+        type: string
+      repository-name:
+        description: Exact caller repository name used for artifacts and images.
+        required: true
+        type: string
+      setup-command:
+        description: Locked dependency installation command.
+        required: true
+        type: string
+      check-command:
+        description: Complete source validation command.
+        required: true
+        type: string
+      release-command:
+        description: Dry-run release command that creates notices, SBOM, checksums, and artifacts.
+        required: true
+        type: string
+      artifact-path:
+        description: Newline-separated release files covered by checksums and provenance.
+        required: true
+        type: string
+      checksums-path:
+        description: SHA-256 checksum manifest produced from locked release artifacts.
+        required: false
+        default: dist/SHA256SUMS
+        type: string
+      notices-path:
+        description: Locked dependency notice generated from the caller's lock file.
+        required: false
+        default: dist/THIRD_PARTY_NOTICES.json
+        type: string
+      sbom-path:
+        description: CycloneDX SBOM generated from the caller's lock file.
+        required: false
+        default: dist/sbom.json
+        type: string
+      publish-image:
+        description: Publish a repository-named GHCR image for the version tag.
+        required: false
+        default: false
+        type: boolean
+      image-variant:
+        description: Optional lowercase suffix; image becomes repository-name-suffix.
+        required: false
+        default: ""
+        type: string
+      build-context:
+        description: Docker build context.
+        required: false
+        default: .
+        type: string
+      dockerfile:
+        description: Dockerfile path relative to the build context.
+        required: false
+        default: Dockerfile
+        type: string
+      prepare-image-command:
+        description: Optional command that stages locked build inputs in the Docker context.
+        required: false
+        default: ""
+        type: string
+      requires-private-library:
+        description: Whether release preparation needs the private python-libraries repository.
+        required: false
+        default: false
+        type: boolean
+      private-library-client-id:
+        description: GitHub App client ID supplied explicitly by the caller when private access is required.
+        required: false
+        default: ""
+        type: string
+      private-library-revision:
+        description: Full commit revision of python-libraries required by the caller.
+        required: false
+        default: ""
+        type: string
+    secrets:
+      PRIVATE_LIBRARY_PRIVATE_KEY:
+        description: GitHub App private key with read-only access to python-libraries.
+        required: false
+
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  release:
+    name: Attested tag release
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Enforce version-tag trigger and repository identity
+        id: identity
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPOSITORY_NAME: ${{ inputs.repository-name }}
+          ACTUAL_REPOSITORY_NAME: ${{ github.event.repository.name }}
+          IMAGE_VARIANT: ${{ inputs.image-variant }}
+          PUBLISH_IMAGE: ${{ inputs.publish-image }}
+        run: |
+          if [[ "${EVENT_NAME}" != "push" || ! "${REF}" =~ ^refs/tags/v[0-9] ]]; then
+            echo "::error::release is restricted to pushed version tags"
+            exit 1
+          fi
+          if [[ "${REPOSITORY_NAME}" != "${ACTUAL_REPOSITORY_NAME}" ]]; then
+            echo "::error::repository-name must exactly match the caller repository"
+            exit 1
+          fi
+          if [[ "${PUBLISH_IMAGE}" == "true" && -n "${IMAGE_VARIANT}" && ! "${IMAGE_VARIANT}" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "::error::image-variant must be a lowercase OCI name suffix"
+            exit 1
+          fi
+          image_name="${REPOSITORY_NAME}"
+          if [[ -n "${IMAGE_VARIANT}" ]]; then
+            image_name="${REPOSITORY_NAME}-${IMAGE_VARIANT}"
+          fi
+          echo "image-name=${image_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Set up pinned repository tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install: true
+          cache: true
+
+      - name: Validate private-library inputs and fail closed
+        if: inputs.requires-private-library
+        shell: bash
+        env:
+          PRIVATE_LIBRARY_CLIENT_ID: ${{ inputs.private-library-client-id }}
+          PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.PRIVATE_LIBRARY_PRIVATE_KEY }}
+          PRIVATE_LIBRARY_REVISION: ${{ inputs.private-library-revision }}
+        run: |
+          if [[ ! "${PRIVATE_LIBRARY_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::private-library-revision must be a full lowercase commit SHA"
+            exit 1
+          fi
+          if [[ -z "${PRIVATE_LIBRARY_CLIENT_ID}" || -z "${PRIVATE_LIBRARY_PRIVATE_KEY}" ]]; then
+            echo "::error::private-library GitHub App credentials are required"
+            exit 1
+          fi
+
+      - name: Mint private-library token
+        id: app-token
+        if: inputs.requires-private-library
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.private-library-client-id }}
+          private-key: ${{ secrets.PRIVATE_LIBRARY_PRIVATE_KEY }}
+          owner: groovemap-music
+          repositories: python-libraries
+
+      - name: Check out pinned private library
+        if: inputs.requires-private-library
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: groovemap-music/python-libraries
+          ref: ${{ inputs.private-library-revision }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: python-libraries
+
+      - name: Authorize private Git dependencies
+        if: inputs.requires-private-library
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${APP_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GROOVEMAP_RUNTIME_REPO=${GITHUB_WORKSPACE}/python-libraries" >> "${GITHUB_ENV}"
+          echo "GROOVEMAP_LIBRARIES_REPO=${GITHUB_WORKSPACE}/python-libraries" >> "${GITHUB_ENV}"
+
+      - name: Install locked dependencies
+        shell: bash
+        run: ${{ inputs.setup-command }}
+
+      - name: Validate tagged source
+        shell: bash
+        run: ${{ inputs.check-command }}
+
+      - name: Generate release artifacts from locked dependencies
+        shell: bash
+        run: ${{ inputs.release-command }}
+
+      - name: Verify checksums, notices, SBOM, and artifact set
+        shell: bash
+        env:
+          CHECKSUMS_PATH: ${{ inputs.checksums-path }}
+          NOTICES_PATH: ${{ inputs.notices-path }}
+          SBOM_PATH: ${{ inputs.sbom-path }}
+          ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        run: |
+          test -n "${ARTIFACT_PATH//[[:space:]]/}"
+          test -s "${CHECKSUMS_PATH}"
+          test -s "${NOTICES_PATH}"
+          test -s "${SBOM_PATH}"
+          checksum_directory="$(dirname "${CHECKSUMS_PATH}")"
+          checksum_file="$(basename "${CHECKSUMS_PATH}")"
+          (cd "${checksum_directory}" && sha256sum --check "${checksum_file}")
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            ${{ inputs.artifact-path }}
+            ${{ inputs.checksums-path }}
+            ${{ inputs.notices-path }}
+            ${{ inputs.sbom-path }}
+
+      - name: Retain repository-named release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.repository-name }}-${{ github.ref_name }}
+          path: |
+            ${{ inputs.artifact-path }}
+            ${{ inputs.checksums-path }}
+            ${{ inputs.notices-path }}
+            ${{ inputs.sbom-path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Prepare Docker build context
+        if: inputs.publish-image && inputs.prepare-image-command != ''
+        shell: bash
+        run: ${{ inputs.prepare-image-command }}
+
+      - name: Log in to GHCR
+        if: inputs.publish-image
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate version-only image metadata
+        id: metadata
+        if: inputs.publish-image
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ steps.identity.outputs.image-name }}
+          tags: |
+            type=ref,event=tag
+          flavor: |
+            latest=false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+
+      - name: Set up Docker Buildx
+        if: inputs.publish-image
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Read reproducible build metadata
+        id: build-metadata
+        if: inputs.publish-image
+        shell: bash
+        run: |
+          build_date="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          echo "date=${build_date}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and publish versioned image
+        id: image
+        if: inputs.publish-image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.build-context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            BUILD_DATE=${{ steps.build-metadata.outputs.date }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest published image
+        if: inputs.publish-image
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ steps.identity.outputs.image-name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Remove private Git credentials
+        if: always() && inputs.requires-private-library
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: git config --global --remove-section "url.https://x-access-token:${APP_TOKEN}@github.com/" || true

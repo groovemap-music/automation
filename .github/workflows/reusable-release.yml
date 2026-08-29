@@ -108,6 +108,7 @@ jobs:
           REF: ${{ github.ref }}
           REPOSITORY_NAME: ${{ inputs.repository-name }}
           ACTUAL_REPOSITORY_NAME: ${{ github.event.repository.name }}
+          REVISION: ${{ github.sha }}
           IMAGE_VARIANT: ${{ inputs.image-variant }}
           PUBLISH_IMAGE: ${{ inputs.publish-image }}
         run: |
@@ -117,6 +118,10 @@ jobs:
           fi
           if [[ "${REPOSITORY_NAME}" != "${ACTUAL_REPOSITORY_NAME}" ]]; then
             echo "::error::repository-name must exactly match the caller repository"
+            exit 1
+          fi
+          if [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::image revision must be a full lowercase commit SHA"
             exit 1
           fi
           if [[ "${PUBLISH_IMAGE}" == "true" && -n "${IMAGE_VARIANT}" && ! "${IMAGE_VARIANT}" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then

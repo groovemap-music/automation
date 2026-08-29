@@ -11,6 +11,7 @@ check: syntax-check test policy-check
 syntax-check:
     node --check scripts/validate.mjs
     node --check scripts/validate.test.mjs
+    node --check scripts/workflow-contract.mjs
     PYTHONPYCACHEPREFIX=.build/pycache python3 -m py_compile .github/actions/validate-python-policy/validate.py
 
 test:

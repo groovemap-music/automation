@@ -7,8 +7,10 @@ commits.
 ```mermaid
 flowchart LR
     Caller[GrooveMap caller repository] -->|full commit pin and typed inputs| Automation[automation reusable interface]
-    Automation -->|invokes repository-owned commands| Gate[Caller quality and release gates]
-    Automation --> Evidence[Checks, coverage, security, and provenance evidence]
+    Automation -->|pull request or dependency update| Gate[Invariant validation job graph]
+    Gate --> Evidence[Checks, coverage, security, package, install, and image evidence]
+    Automation -->|pushed version tag only| Release[Checksums, notices, SBOM, and provenance]
+    Release --> Artifact[Repository-named artifact and optional GHCR image]
     Infra[infra OpenTofu] --> Controls[Repository controls, labels, teams, and secrets]
     Profile[.github repository] --> Community[Organization profile and community health]
     Controls -. outside source boundary .-> Automation
@@ -21,6 +23,7 @@ flowchart LR
 - External actions and cross-repository calls use full commit revisions.
 - Permissions and secrets are explicit interface properties.
 - Pull requests use one consistent required job graph, including dependency-update pull requests.
+- Missing private-library credentials fail the complete gate; they never select a smaller gate.
 - Publishing is isolated to reviewed tag-only release interfaces.
 - Local contract tests exercise success, failure, cancellation, and artifact behavior without
   organization credentials.

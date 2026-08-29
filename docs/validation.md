@@ -8,11 +8,12 @@ just check
 
 It performs three deterministic phases:
 
-1. Node syntax checks for the validator and its tests.
-2. Standard-library behavior tests for links, exposure rules, action pins, and dependency policy.
+1. Node and Python syntax checks for the validators and tests.
+2. Standard-library behavior tests for links, exposure rules, action pins, dependency policy,
+   invariant CI behavior, and tag-release safety.
 3. Repository validation covering required files, Markdown/local links, MIT and notice metadata,
    Mermaid diagrams, CI permissions, Dependabot ecosystems/labels, immutable action references,
-   and private-material patterns.
+   reusable interface contracts, tag-only publication, and private-material patterns.
 
 The command reads only the checkout and creates no tracked files. It does not require a package
 install, network connection, GitHub token, organization secret, container runtime, or live service.

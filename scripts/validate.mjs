@@ -3,6 +3,13 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  renderCiContract,
+  renderReleaseContract,
+  validateDependabotLabels,
+  validateWorkflowSource,
+} from "./workflow-contract.mjs";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MIT_SHA256 = "38b811191c91cc9577669a398064070bfed40c462bd084b789de409144f1b129";
 const ALLOWED_EXTERNAL_HOSTS = new Set(["github.com", "groovemap.music"]);
@@ -28,9 +35,16 @@ const REQUIRED_FILES = [
   "docs/architecture.md",
   "docs/governance.md",
   "docs/interfaces.md",
+  "docs/readiness.md",
   "docs/validation.md",
+  "fixtures/contracts/container-ci.json",
+  "fixtures/contracts/container-release.json",
+  "fixtures/contracts/node-ci.json",
+  "fixtures/contracts/python-ci.json",
+  "fixtures/contracts/rust-ci.json",
   "scripts/validate.mjs",
   "scripts/validate.test.mjs",
+  "scripts/workflow-contract.mjs",
 ];
 const MANIFEST_ECOSYSTEMS = [
   ["package.json", "npm"],
@@ -254,6 +268,9 @@ function checkAutomationPolicy(errors, files) {
       const issue = validateActionReference(match[1]);
       if (issue) errors.push(`${relative(ROOT, path)}: ${issue}`);
     }
+    if (workflowPaths.includes(path)) {
+      errors.push(...validateWorkflowSource(content).map((issue) => `${relative(ROOT, path)}: ${issue}`));
+    }
   }
 
   for (const path of workflowPaths.filter((path) => path.includes("reusable-"))) {
@@ -269,8 +286,52 @@ function checkAutomationPolicy(errors, files) {
   for (const ecosystem of ecosystems) {
     if (!dependabot.includes(`package-ecosystem: ${ecosystem}`)) errors.push(`.github/dependabot.yml: missing ${ecosystem} ecosystem`);
   }
-  if (!dependabot.includes("labels: [dependencies, github-actions]")) {
-    errors.push(".github/dependabot.yml: use the OpenTofu-managed dependencies and github-actions labels");
+  errors.push(...validateDependabotLabels(dependabot, ["dependencies", "github-actions"]).map((issue) => `.github/dependabot.yml: ${issue}`));
+}
+
+function checkContractFixtures(errors) {
+  const ci = readFileSync(resolve(ROOT, ".github/workflows/reusable-ci.yml"), "utf8");
+  const release = readFileSync(resolve(ROOT, ".github/workflows/reusable-release.yml"), "utf8");
+  const fixtureRoot = resolve(ROOT, "fixtures/contracts");
+  const fixturePaths = readdirSync(fixtureRoot).filter((name) => name.endsWith(".json")).sort();
+  const capabilities = new Set();
+
+  for (const name of fixturePaths) {
+    const display = `fixtures/contracts/${name}`;
+    let fixture;
+    try {
+      fixture = JSON.parse(readFileSync(resolve(fixtureRoot, name), "utf8"));
+    } catch {
+      errors.push(`${display}: invalid JSON fixture`);
+      continue;
+    }
+    capabilities.add(fixture.capability);
+
+    if (fixture.kind === "ci") {
+      const ordinary = renderCiContract(ci, fixture);
+      const dependencyUpdate = renderCiContract(ci, { ...fixture, actor: "dependabot[bot]" });
+      for (const issue of ordinary.issues) errors.push(`${display}: ${issue}`);
+      for (const issue of dependencyUpdate.issues) errors.push(`${display}: Dependabot: ${issue}`);
+      if (JSON.stringify(ordinary.jobs) !== JSON.stringify(dependencyUpdate.jobs)) {
+        errors.push(`${display}: Dependabot must render the identical job and step graph`);
+      }
+      if (!ordinary.jobs.some((job) => job.id === "result" && job.needs === "validate")) {
+        errors.push(`${display}: rendered CI contract must contain the fail-closed result job`);
+      }
+      if (fixture.capability === "container") {
+        const steps = ordinary.jobs.flatMap((job) => job.steps);
+        if (!steps.includes("Build and inspect local container")) errors.push(`${display}: container image validation is missing`);
+      }
+    } else if (fixture.kind === "release") {
+      const rendered = renderReleaseContract(release, fixture);
+      for (const issue of rendered.issues) errors.push(`${display}: ${issue}`);
+    } else {
+      errors.push(`${display}: kind must be ci or release`);
+    }
+  }
+
+  for (const capability of ["python", "rust", "node", "container", "tag-release"]) {
+    if (!capabilities.has(capability)) errors.push(`fixtures/contracts: missing representative ${capability} fixture`);
   }
 }
 
@@ -289,6 +350,7 @@ export function validate() {
   checkMarkdown(errors);
   checkLegalBoundary(errors);
   checkAutomationPolicy(errors, files);
+  checkContractFixtures(errors);
   checkExposure(errors, files);
   return errors;
 }

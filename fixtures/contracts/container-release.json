@@ -1,0 +1,19 @@
+{
+  "kind": "release",
+  "capability": "tag-release",
+  "eventName": "push",
+  "ref": "refs/tags/v1.2.3",
+  "actualRepositoryName": "fixture-container",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "expectedArtifactName": "fixture-container-v1.2.3",
+  "expectedImageName": "fixture-container-worker",
+  "inputs": {
+    "repository-name": "fixture-container",
+    "setup-command": "just setup",
+    "check-command": "just check",
+    "release-command": "just release-dry-run",
+    "artifact-path": "dist/fixture-container.tar.gz",
+    "publish-image": true,
+    "image-variant": "worker"
+  }
+}

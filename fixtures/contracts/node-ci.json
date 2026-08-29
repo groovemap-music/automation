@@ -1,0 +1,17 @@
+{
+  "kind": "ci",
+  "capability": "node",
+  "actor": "synthetic-developer",
+  "inputs": {
+    "language": "node",
+    "setup-command": "just setup",
+    "check-command": "just check",
+    "coverage-command": "npm run test:coverage",
+    "audit-command": "just audit",
+    "license-command": "just license-check",
+    "secret-scan-command": "just secret-scan",
+    "package-command": "just build",
+    "install-command": "just check",
+    "coverage-files": "coverage/lcov.info"
+  }
+}

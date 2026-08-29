@@ -1,0 +1,17 @@
+{
+  "kind": "ci",
+  "capability": "rust",
+  "actor": "synthetic-developer",
+  "inputs": {
+    "language": "rust",
+    "setup-command": "just setup",
+    "check-command": "just check",
+    "coverage-command": "just coverage",
+    "audit-command": "just audit",
+    "license-command": "just license-check",
+    "secret-scan-command": "just secret-scan",
+    "package-command": "just build",
+    "install-command": "just check",
+    "coverage-files": "lcov.info"
+  }
+}

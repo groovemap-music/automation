@@ -17,8 +17,9 @@ OpenTofu-managed taxonomy.
 
 The declared dependency labels are `dependencies` and `github-actions`. Their live creation and
 fleet convergence remain gated on a separately approved OpenTofu apply. Repository validation
-checks the declared contract but does not apply infrastructure or claim public readiness before
-that external gate completes.
+checks the declared contract but does not apply infrastructure. The source contract can be ready
+for caller migration while the repository remains private; public visibility requires the
+separately approved organization-wide change and completion of the external label gate.
 
 Private deployment instructions and operational procedures remain in their owning private
 repositories. Redacting such material is not a publication strategy; it must not enter this

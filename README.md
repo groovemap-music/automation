@@ -1,10 +1,14 @@
 # GrooveMap automation
 
-`automation` is the public source of reusable GitHub Actions workflows and composite actions for
-GrooveMap repositories. It provides a complete pull-request gate for Python, Rust, Node, mixed,
-container, coverage, security, package, and install checks, plus an attested tag-release path.
-Callers select their repository-owned commands and consume these interfaces at immutable full
-commit revisions.
+`automation` is the publication-ready source of reusable GitHub Actions workflows and composite
+actions for GrooveMap repositories. It provides a complete pull-request gate for Python, Rust,
+Node, mixed, container, coverage, security, package, and install checks, plus an attested
+tag-release path. Callers select their repository-owned commands and consume these interfaces at
+immutable full commit revisions.
+
+The contract is [ready for caller migration](docs/readiness.md) after review and merge. The
+repository remains private until the separately approved organization-wide visibility change;
+validation and release-contract tests do not change that state.
 
 ## Development
 
@@ -38,7 +42,8 @@ artifacts belong here. Examples and fixtures must use reserved synthetic values.
 
 See the [documentation index](docs/README.md) for the architecture, governance boundary, and
 local validation contract. The [interface guide](docs/interfaces.md) documents every reusable
-input, failure mode, permission, and release invariant. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+input, failure mode, permission, and release invariant, while the [readiness guide](docs/readiness.md)
+records the caller-migration proof and publication gate. Read [CONTRIBUTING.md](CONTRIBUTING.md)
 before proposing a change and [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 ## License

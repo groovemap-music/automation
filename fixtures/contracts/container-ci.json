@@ -1,0 +1,18 @@
+{
+  "kind": "ci",
+  "capability": "container",
+  "actor": "synthetic-developer",
+  "inputs": {
+    "language": "mixed",
+    "setup-command": "just setup",
+    "check-command": "just check",
+    "coverage-command": "just test",
+    "audit-command": "just audit",
+    "license-command": "just license-check",
+    "secret-scan-command": "just secret-scan",
+    "package-command": "just build",
+    "install-command": "just install-check",
+    "image-command": "just image",
+    "coverage-files": "coverage.xml"
+  }
+}

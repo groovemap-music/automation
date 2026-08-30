@@ -399,9 +399,10 @@ export function renderReleaseContract(content, scenario) {
   const metadataStep = steps.find((step) => step.name === "Generate version-only image metadata")?.raw ?? "";
   const repositoryName = call.inputs["repository-name"];
   const tag = scenario.ref?.replace(/^refs\/tags\//, "") ?? "";
-  const variant = call.inputs["image-variant"] ?? "";
-  const imageName = variant ? `${repositoryName}-${variant}` : repositoryName;
-  const artifactName = `${repositoryName}-${tag}`;
+  const imageVariant = call.inputs["image-variant"] ?? "";
+  const artifactVariant = call.inputs["artifact-variant"] ?? "";
+  const imageName = imageVariant ? `${repositoryName}-${imageVariant}` : repositoryName;
+  const artifactName = `${repositoryName}-${tag}${artifactVariant ? `-${artifactVariant}` : ""}`;
 
   if (!identityStep.includes('"${EVENT_NAME}" != "push"') || !identityStep.includes("^refs/tags/v[0-9]")) {
     issues.push("release workflow is missing its pushed-version-tag guard");
@@ -415,8 +416,14 @@ export function renderReleaseContract(content, scenario) {
   if (!identityStep.includes('image_name="${REPOSITORY_NAME}-${IMAGE_VARIANT}"')) {
     issues.push("release workflow is missing repository-derived image naming");
   }
-  if (!retainedStep.includes("name: ${{ inputs.repository-name }}-${{ github.ref_name }}")) {
-    issues.push("release workflow is missing repository-derived artifact naming");
+  if (
+    !identityStep.includes('"${ARTIFACT_VARIANT}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$')
+    || !identityStep.includes('artifact_name="${artifact_name}-${ARTIFACT_VARIANT}"')
+  ) {
+    issues.push("release workflow is missing validated artifact variant naming");
+  }
+  if (!retainedStep.includes("name: ${{ steps.identity.outputs.artifact-name }}")) {
+    issues.push("release workflow is missing the validated artifact identity");
   }
   if (!metadataStep.includes("${{ steps.identity.outputs.image-name }}")) {
     issues.push("release workflow is missing the validated image identity");
@@ -427,6 +434,9 @@ export function renderReleaseContract(content, scenario) {
   }
   if (repositoryName !== scenario.actualRepositoryName) issues.push("repository name drift detected");
   if (!/^[0-9a-f]{40}$/.test(scenario.revision ?? "")) issues.push("image revision must be a full lowercase commit SHA");
+  if (artifactVariant !== "" && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(artifactVariant)) {
+    issues.push("artifact variant must be a lowercase hyphen-separated slug");
+  }
   if (scenario.expectedImageName && scenario.expectedImageName !== imageName) issues.push("repository/image name drift detected");
   if (scenario.expectedArtifactName && scenario.expectedArtifactName !== artifactName) {
     issues.push("repository/artifact name drift detected");

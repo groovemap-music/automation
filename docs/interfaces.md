@@ -141,7 +141,11 @@ that rollout is incomplete, those runs fail visibly with the full graph intact.
 tag and rejects a `repository-name` that differs from the caller. The caller's `release-command`
 must build from its lock file and produce the declared artifact set, `SHA256SUMS`, locked dependency
 notice, and CycloneDX SBOM. The workflow verifies every checksum, retains a repository-and-version
-named artifact, and creates a GitHub build-provenance attestation.
+named artifact, and creates a GitHub build-provenance attestation. A caller that invokes the
+workflow once keeps the stable `<repository-name>-<version>` artifact name. A caller with multiple
+release jobs for the same tag must give each job a distinct `artifact-variant`; the resulting name
+is `<repository-name>-<version>-<artifact-variant>`. Variants are lowercase hyphen-separated slugs,
+so unsafe or path-like values fail before release work begins.
 
 When `publish-image` is true, the image is
 `ghcr.io/<owner>/<repository-name>` or `ghcr.io/<owner>/<repository-name>-<image-variant>`. Only the
@@ -178,6 +182,10 @@ jobs:
       id-token: write
       packages: write
 ```
+
+For example, parallel `primary` and `performance` jobs supply `artifact-variant: primary` and
+`artifact-variant: performance`. They retain distinct artifacts while a repository with one release
+job omits the input and preserves its existing artifact name.
 
 Repository workflows must not add scheduled publication or an unversioned image tag around this
 interface.

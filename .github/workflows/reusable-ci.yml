@@ -75,13 +75,20 @@ on:
         default: ""
         type: string
       coverage-files:
-        description: Newline-separated coverage report paths or glob patterns.
+        description: Newline-separated explicit repository-relative coverage report paths.
         required: true
         type: string
       coverage-flags:
         description: Codecov flags for the caller repository.
         required: false
         default: unit
+        type: string
+      browser-coverage-mapping:
+        description: >-
+          JSON array of browser projects with one explicit LCOV path and distinct failure-artifact
+          paths per project. Each project is uploaded to Codecov with its project name as the sole flag.
+        required: false
+        default: ""
         type: string
       upload-codecov:
         description: Also send coverage to Codecov; artifact retention always remains enabled.
@@ -119,6 +126,8 @@ jobs:
     name: Required validation
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
+    outputs:
+      browser-mapping-valid: ${{ steps.interface.outputs.browser-mapping-valid }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,6 +141,7 @@ jobs:
           cache: true
 
       - name: Validate interface and fail closed
+        id: interface
         shell: bash
         env:
           LANGUAGE: ${{ inputs.language }}
@@ -144,6 +154,7 @@ jobs:
           PACKAGE_COMMAND: ${{ inputs.package-command }}
           INSTALL_COMMAND: ${{ inputs.install-command }}
           COVERAGE_FILES: ${{ inputs.coverage-files }}
+          BROWSER_COVERAGE_MAPPING: ${{ inputs.browser-coverage-mapping }}
           E2E_SETUP_COMMAND: ${{ inputs.e2e-setup-command }}
           E2E_INSTRUMENT_COMMAND: ${{ inputs.e2e-instrument-command }}
           E2E_COMMAND: ${{ inputs.e2e-command }}
@@ -183,6 +194,113 @@ jobs:
           fi
           if [[ -n "${E2E_COMMAND}" && -z "${E2E_POST_COMMAND}" ]]; then
             echo "::error::e2e-post-command is required so post-processing and teardown always run"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import PurePosixPath
+
+          def explicit_path(value, *, lcov=False):
+              if not isinstance(value, str) or not value or value != value.strip():
+                  return False
+              if any(character in value for character in "\r\n,\\*?[]{}"):
+                  return False
+              if value.startswith("!"):
+                  return False
+              path = PurePosixPath(value)
+              if path.is_absolute() or value.startswith("./") or ".." in path.parts:
+                  return False
+              if path.as_posix() != value or value == ".":
+                  return False
+              return not lcov or path.suffix in {".info", ".lcov"}
+
+          raw_coverage_files = os.environ["COVERAGE_FILES"].replace("\r\n", "\n")
+          if "\r" in raw_coverage_files:
+              raise SystemExit("coverage-files must use newline-separated paths")
+          coverage_files = raw_coverage_files.split("\n")
+          if coverage_files and coverage_files[-1] == "":
+              coverage_files.pop()
+          if not coverage_files:
+              raise SystemExit("coverage-files must contain at least one explicit path")
+          seen_coverage_files = set()
+          for index, coverage_file in enumerate(coverage_files):
+              if not explicit_path(coverage_file):
+                  raise SystemExit(f"coverage-files entry {index} is not an explicit repository-relative path")
+              if coverage_file in seen_coverage_files:
+                  raise SystemExit(f"coverage-files contains duplicate path: {coverage_file}")
+              seen_coverage_files.add(coverage_file)
+
+          retained_paths = list(coverage_files)
+          retained_path_set = set(coverage_files)
+
+          def retain(path):
+              if path not in retained_path_set:
+                  retained_path_set.add(path)
+                  retained_paths.append(path)
+
+          def write_outputs(*, browser_mapping_valid):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write(f"codecov-files={','.join(coverage_files)}\n")
+                  retained_paths_json = json.dumps(retained_paths, separators=(",", ":"))
+                  output.write(f"retained-coverage-paths-json={retained_paths_json}\n")
+                  output.write(f"browser-mapping-valid={str(browser_mapping_valid).lower()}\n")
+
+          raw = os.environ["BROWSER_COVERAGE_MAPPING"]
+          if not raw:
+              write_outputs(browser_mapping_valid=True)
+              raise SystemExit(0)
+
+          try:
+              mapping = json.loads(raw)
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"browser-coverage-mapping must be valid JSON: {error.msg}") from error
+
+          if not isinstance(mapping, list) or not mapping:
+              raise SystemExit("browser-coverage-mapping must be a nonempty JSON array")
+
+          projects = set()
+          lcov_paths = set()
+          artifact_paths = set()
+          for index, entry in enumerate(mapping):
+              if not isinstance(entry, dict) or set(entry) != {"project", "lcov", "artifacts"}:
+                  raise SystemExit(
+                      f"browser-coverage-mapping entry {index} must contain exactly project, lcov, and artifacts"
+                  )
+              project = entry["project"]
+              lcov = entry["lcov"]
+              artifacts = entry["artifacts"]
+              if not isinstance(project, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", project):
+                  raise SystemExit(f"browser-coverage-mapping entry {index} has an invalid project flag")
+              if project in projects:
+                  raise SystemExit(f"browser-coverage-mapping contains duplicate project: {project}")
+              if not explicit_path(lcov, lcov=True):
+                  raise SystemExit(f"browser-coverage-mapping entry {index} needs one explicit LCOV file")
+              if lcov in lcov_paths:
+                  raise SystemExit(f"browser-coverage-mapping contains duplicate LCOV file: {lcov}")
+              if not isinstance(artifacts, list) or not artifacts:
+                  raise SystemExit(f"browser-coverage-mapping entry {index} needs failure-artifact paths")
+              for artifact in artifacts:
+                  if not explicit_path(artifact):
+                      raise SystemExit(
+                          f"browser-coverage-mapping entry {index} has a non-explicit failure-artifact path"
+                      )
+                  if artifact in artifact_paths:
+                      raise SystemExit(f"browser-coverage-mapping contains duplicate artifact path: {artifact}")
+                  artifact_paths.add(artifact)
+              projects.add(project)
+              lcov_paths.add(lcov)
+              retain(lcov)
+              for artifact in artifacts:
+                  retain(artifact)
+
+          write_outputs(browser_mapping_valid=True)
+          PY
+
+          if [[ -n "${BROWSER_COVERAGE_MAPPING}" && -z "${E2E_COMMAND}" ]]; then
+            echo "::error::e2e-command is required when browser-coverage-mapping is configured"
             exit 1
           fi
 
@@ -292,22 +410,113 @@ jobs:
         shell: bash
         run: ${{ inputs.image-command }}
 
+      - name: Stage workspace-relative coverage evidence
+        id: stage-coverage
+        if: always() && steps.interface.outcome == 'success'
+        shell: bash
+        env:
+          RETAINED_COVERAGE_PATHS_JSON: ${{ steps.interface.outputs.retained-coverage-paths-json }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path, PurePosixPath
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          staging_root = Path(os.environ["RUNNER_TEMP"]) / "groovemap-coverage-artifact"
+          if staging_root.is_symlink():
+              staging_root.unlink()
+          elif staging_root.exists():
+              shutil.rmtree(staging_root)
+          payload_root = staging_root / "workspace"
+          payload_root.mkdir(parents=True)
+
+          try:
+              retained_paths = json.loads(os.environ["RETAINED_COVERAGE_PATHS_JSON"])
+          except json.JSONDecodeError as error:
+              raise SystemExit("retained coverage paths output must be valid JSON") from error
+          if (
+              not isinstance(retained_paths, list)
+              or not retained_paths
+              or not all(isinstance(path, str) for path in retained_paths)
+              or len(retained_paths) != len(set(retained_paths))
+          ):
+              raise SystemExit("retained coverage paths output must be a nonempty unique string array")
+          archived_paths = []
+
+          def reject_symlinks(source):
+              if source.is_symlink():
+                  raise SystemExit(f"coverage evidence must not contain symlinks: {source.relative_to(workspace)}")
+              if source.is_dir():
+                  for child in sorted(source.iterdir(), key=lambda item: item.name):
+                      reject_symlinks(child)
+
+          def copy_path(source, destination):
+              if source.is_dir():
+                  destination.mkdir(parents=True, exist_ok=True)
+                  for child in sorted(source.iterdir(), key=lambda item: item.name):
+                      copy_path(child, destination / child.name)
+              else:
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  if destination.exists() and not destination.is_file():
+                      raise SystemExit(f"coverage staging collision: {destination.relative_to(payload_root)}")
+                  shutil.copy2(source, destination)
+
+          for retained_path in retained_paths:
+              relative = PurePosixPath(retained_path)
+              source = workspace.joinpath(*relative.parts)
+              cursor = workspace
+              for part in relative.parts:
+                  cursor /= part
+                  if cursor.is_symlink():
+                      raise SystemExit(f"coverage evidence must not traverse symlinks: {retained_path}")
+              resolved_source = source.resolve(strict=False)
+              if not resolved_source.is_relative_to(workspace):
+                  raise SystemExit(f"coverage evidence escapes the workspace: {retained_path}")
+              if not source.exists() and not source.is_symlink():
+                  continue
+              reject_symlinks(source)
+              destination = payload_root.joinpath(*relative.parts)
+              if destination.exists() and source.is_dir() != destination.is_dir():
+                  raise SystemExit(f"coverage staging collision: {retained_path}")
+              copy_path(source, destination)
+              archived_paths.append(retained_path)
+
+          if not archived_paths:
+              raise SystemExit("none of the declared coverage evidence paths exist")
+
+          manifest = {
+              "format": 1,
+              "retained_paths": retained_paths,
+              "archived_paths": archived_paths,
+          }
+          (staging_root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"artifact-root={staging_root}\n")
+          PY
+
       - name: Retain coverage evidence
-        if: always()
+        if: always() && steps.stage-coverage.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ github.event.repository.name }}-coverage-${{ github.run_id }}
-          path: ${{ inputs.coverage-files }}
+          path: ${{ steps.stage-coverage.outputs.artifact-root }}
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 14
 
       - name: Upload coverage to Codecov
-        if: always() && inputs.upload-codecov
+        if: always() && inputs.upload-codecov && steps.interface.outcome == 'success'
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ${{ inputs.coverage-files }}
+          files: ${{ steps.interface.outputs.codecov-files }}
           flags: ${{ inputs.coverage-flags }}
+          disable_search: true
           fail_ci_if_error: true
 
       - name: Remove private Git credentials
@@ -317,10 +526,118 @@ jobs:
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: git config --global --remove-section "url.https://x-access-token:${APP_TOKEN}@github.com/" || true
 
+  browser-codecov:
+    name: Browser coverage (${{ matrix.upload.project }})
+    if: always() && inputs.upload-codecov && inputs.browser-coverage-mapping != '' && needs.validate.outputs.browser-mapping-valid == 'true'
+    needs: validate
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        upload: ${{ fromJSON(inputs.browser-coverage-mapping) }}
+    steps:
+      - name: Download retained coverage evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v8.0.1
+        with:
+          name: ${{ github.event.repository.name }}-coverage-${{ github.run_id }}
+          path: ${{ runner.temp }}/groovemap-coverage-download
+
+      - name: Restore workspace-relative coverage evidence
+        shell: bash
+        env:
+          BROWSER_LCOV_PATH: ${{ matrix.upload.lcov }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path, PurePosixPath
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          artifact_root = Path(os.environ["RUNNER_TEMP"]) / "groovemap-coverage-download"
+          payload_root = artifact_root / "workspace"
+          manifest_path = artifact_root / "manifest.json"
+          if not manifest_path.is_file() or manifest_path.is_symlink():
+              raise SystemExit("coverage artifact manifest is missing or unsafe")
+
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          if set(manifest) != {"format", "retained_paths", "archived_paths"} or manifest["format"] != 1:
+              raise SystemExit("coverage artifact manifest has an unsupported shape")
+          retained_paths = manifest["retained_paths"]
+          archived_paths = manifest["archived_paths"]
+          if not isinstance(retained_paths, list) or not isinstance(archived_paths, list):
+              raise SystemExit("coverage artifact manifest path lists are invalid")
+          if len(retained_paths) != len(set(retained_paths)) or len(archived_paths) != len(set(archived_paths)):
+              raise SystemExit("coverage artifact manifest contains duplicate paths")
+
+          def safe_relative(value):
+              if not isinstance(value, str) or not value or value != value.strip():
+                  return False
+              relative = PurePosixPath(value)
+              return (
+                  not relative.is_absolute()
+                  and relative.as_posix() == value
+                  and value != "."
+                  and not value.startswith("./")
+                  and ".." not in relative.parts
+              )
+
+          if not all(safe_relative(path) for path in retained_paths + archived_paths):
+              raise SystemExit("coverage artifact manifest contains an unsafe path")
+          if not set(archived_paths).issubset(retained_paths):
+              raise SystemExit("coverage artifact manifest contains an undeclared archived path")
+          if payload_root.is_symlink() or not payload_root.is_dir():
+              raise SystemExit("coverage artifact payload is missing or unsafe")
+
+          archived = [PurePosixPath(path) for path in archived_paths]
+          created = set()
+          for source in sorted(payload_root.rglob("*")):
+              if source.is_symlink():
+                  raise SystemExit(f"coverage artifact contains a symlink: {source.relative_to(payload_root)}")
+              relative = source.relative_to(payload_root)
+              relative_posix = PurePosixPath(relative.as_posix())
+              if not any(
+                  relative_posix == root or root in relative_posix.parents or relative_posix in root.parents
+                  for root in archived
+              ):
+                  raise SystemExit(f"coverage artifact contains undeclared payload: {relative}")
+              destination = workspace / relative
+              if not destination.resolve(strict=False).is_relative_to(workspace):
+                  raise SystemExit(f"coverage artifact escapes the workspace: {relative}")
+              if destination.exists() and relative not in created:
+                  raise SystemExit(f"coverage artifact collides with workspace path: {relative}")
+              if source.is_dir():
+                  destination.mkdir(parents=True, exist_ok=True)
+                  created.add(relative)
+              elif source.is_file():
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(source, destination)
+                  created.add(relative)
+              else:
+                  raise SystemExit(f"coverage artifact contains an unsupported entry: {relative}")
+
+          lcov_path = os.environ["BROWSER_LCOV_PATH"]
+          if not safe_relative(lcov_path) or lcov_path not in retained_paths:
+              raise SystemExit("browser LCOV path is not declared by the coverage artifact")
+          restored_lcov = workspace.joinpath(*PurePosixPath(lcov_path).parts)
+          if not restored_lcov.is_file() or restored_lcov.is_symlink():
+              raise SystemExit(f"browser LCOV was not restored at its requested path: {lcov_path}")
+          PY
+
+      - name: Upload browser coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ matrix.upload.lcov }}
+          flags: e2e-${{ matrix.upload.project }}
+          disable_search: true
+          fail_ci_if_error: true
+
   result:
     name: Required result
     if: always()
-    needs: validate
+    needs: [validate, browser-codecov]
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     steps:
@@ -328,4 +645,13 @@ jobs:
         shell: bash
         env:
           VALIDATION_RESULT: ${{ needs.validate.result }}
-        run: test "${VALIDATION_RESULT}" = success
+          BROWSER_CODECOV_RESULT: ${{ needs.browser-codecov.result }}
+          BROWSER_COVERAGE_MAPPING: ${{ inputs.browser-coverage-mapping }}
+          UPLOAD_CODECOV: ${{ inputs.upload-codecov }}
+        run: |
+          test "${VALIDATION_RESULT}" = success
+          if [[ "${UPLOAD_CODECOV}" == "true" && -n "${BROWSER_COVERAGE_MAPPING}" ]]; then
+            test "${BROWSER_CODECOV_RESULT}" = success
+          else
+            test "${BROWSER_CODECOV_RESULT}" = skipped
+          fi

@@ -20,7 +20,12 @@ The caller must provide these nonblank inputs:
 - `coverage-command`: generate the declared XML or LCOV coverage report;
 - `audit-command`, `license-command`, and `secret-scan-command`: security gates;
 - `package-command` and `install-command`: build and installed-artifact smoke test; and
-- `coverage-files`: reports retained as a repository-named artifact.
+- `coverage-files`: newline-separated, explicit repository-relative report paths retained as a
+  repository-named artifact. Empty entries, duplicates, globs, commas, absolute paths, parent
+  traversal, trailing slashes, non-canonical paths, and a leading `!` are rejected before retention
+  or upload. A
+  leading `!` would be interpreted as an exclusion by artifact upload; `!` remains valid elsewhere
+  in an otherwise canonical literal path.
 
 `integration-command` and `image-command` are optional only when that repository has no matching
 surface. Browser repositories also provide `e2e-command` and the matching `e2e-post-command`;
@@ -29,6 +34,46 @@ dependency setup and JavaScript instrumentation use the optional `e2e-setup-comm
 integration execution, and coverage retention and optional Codecov upload do the same. These
 evidence steps cannot turn a failed validation green: the aggregate `Required result` job remains
 fail-closed.
+
+Artifact retention consumes `coverage-files` with its newline-separated shape intact. After
+validation, the workflow deterministically joins the same ordered paths with commas for Codecov's
+`files` input. Callers therefore declare one canonical path list without relying on Codecov to
+interpret a multiline scalar or on artifact upload to interpret comma-separated paths. Automatic
+Codecov report search is disabled, so the generic upload contains exactly that validated comma
+list even when browser reports are also present in the workspace.
+
+Browser repositories that upload coverage also provide `browser-coverage-mapping` as a JSON array.
+Every entry contains exactly `project`, `lcov`, and `artifacts`:
+
+- `project` is a unique lowercase browser-project slug. Codecov receives exactly one flag derived
+  as `e2e-<project>`;
+- `lcov` is one unique, explicit repository-relative `.info` or `.lcov` file. Newlines, commas,
+  globs, absolute paths, parent traversal, trailing slashes, non-canonical whitespace, and an
+  exclusion-prefixed leading `!` are rejected; and
+- `artifacts` is a nonempty array of unique, explicit repository-relative directories or files
+  containing that project's traces, screenshots, videos, raw coverage, or other failure evidence.
+  The same canonical literal-path rules apply, including rejection of a leading `!` while allowing
+  `!` in later path segments.
+
+The reusable workflow validates the complete mapping before browser execution and builds one
+deterministic retained-path list: generic `coverage-files` first, then each project's LCOV file and
+failure-artifact paths in mapping order. A path present in more than one category is retained once;
+duplicate projects, duplicate mapped LCOV files, and duplicate mapped failure paths remain invalid.
+It copies each existing declaration beneath a single temporary `workspace/` payload while retaining
+the complete repository-relative path and records the ordered declarations in a manifest. The
+artifact uploader receives that one staging root, so its least-common-ancestor normalization cannot
+strip a leading path segment such as `coverage/`. Each browser matrix job downloads the root and
+reconstructs the payload beneath its clean workspace before verifying that its exact mapped LCOV
+path is a regular file. Although reconstruction restores every retained report for deterministic
+evidence, automatic Codecov report search remains disabled and each matrix upload sends only its
+one mapped LCOV under its one `e2e-<project>` flag.
+
+Staging and reconstruction reject symlinks, paths that escape the workspace, undeclared payload
+entries, duplicate manifest paths, and destination collisions. This keeps sequential browser runs
+isolated: callers must write each project's failure evidence only beneath that project's mapped
+paths and must not clear an earlier project's paths when starting the next project. An empty JSON
+array, malformed project, newline, glob, or former multi-flag shape fails before upload. Omitting the
+input remains supported for non-browser callers.
 
 Private Python-library access requires all three explicit inputs: `requires-private-library: true`,
 `private-library-client-id`, and an immutable `private-library-revision`, plus the
@@ -65,15 +110,26 @@ jobs:
       e2e-instrument-command: node explore/scripts/instrument-coverage.mjs
       e2e-command: just e2e
       e2e-post-command: node explore/scripts/generate-coverage-report.mjs
+      browser-coverage-mapping: >-
+        [{"project":"chromium","lcov":"coverage/e2e/chromium/lcov.info","artifacts":["test-results/chromium","coverage/e2e/raw/chromium"]},
+        {"project":"firefox","lcov":"coverage/e2e/firefox/lcov.info","artifacts":["test-results/firefox","coverage/e2e/raw/firefox"]}]
       coverage-files: |
         coverage.xml
         explore/coverage/lcov.info
+        coverage/e2e/lcov.info
+      coverage-flags: python,javascript,e2e,explorer
+      upload-codecov: true
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 ```
 
 When E2E is enabled, `e2e-post-command` is mandatory and should be safe to invoke after partial
 setup or a failed test. It owns Istanbul report generation and any teardown required to flush
 browser coverage. The retained artifact step uses `if-no-files-found: error`, so losing both the
 ordinary and browser reports is visible even when an earlier command has already failed.
+Mapped project LCOV files and failure directories are added to that retained artifact automatically;
+they do not need entries in `coverage-files`. If a mapped LCOV is also a generic coverage report,
+the retained-path union includes it only once while the generic Codecov upload still receives it.
 
 Repositories that require the private library map the client ID, revision, and secret explicitly.
 Infrastructure owns creating those values and making them available to dependency-update runs; if

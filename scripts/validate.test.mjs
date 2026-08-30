@@ -84,6 +84,43 @@ function runWorkflowPythonStep(stepName, environment) {
   });
 }
 
+function runReleaseIdentityRuntime({ artifactVariant = "" } = {}) {
+  const jobs = parseWorkflowDefinition(REUSABLE_RELEASE).jobs;
+  const step = jobs
+    .flatMap((job) => job.steps)
+    .find((candidate) => candidate.name === "Enforce version-tag trigger and repository identity");
+  assert.ok(step, "release identity step must be present");
+  const match = step.raw.match(/        run: \|\n([\s\S]*)/);
+  assert.ok(match, "release identity step must contain one inline Bash program");
+  const script = match[1].split("\n").map((line) => line.slice(10)).join("\n");
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-release-identity-"));
+  const output = resolve(directory, "github-output");
+  try {
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        EVENT_NAME: "push",
+        REF: "refs/tags/v1.2.3",
+        REPOSITORY_NAME: "fixture-container",
+        ACTUAL_REPOSITORY_NAME: "fixture-container",
+        REVISION: "0123456789abcdef0123456789abcdef01234567",
+        IMAGE_VARIANT: "worker",
+        ARTIFACT_VARIANT: artifactVariant,
+        TAG_NAME: "v1.2.3",
+        PUBLISH_IMAGE: "true",
+        GITHUB_OUTPUT: output,
+      },
+    });
+    return {
+      ...result,
+      output: result.status === 0 ? readFileSync(output, "utf8") : "",
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function jsonOutput(output, name) {
   const match = output.match(new RegExp(`^${name}=(.*)$`, "m"));
   assert.ok(match, `${name} JSON output must be present`);
@@ -618,6 +655,66 @@ test("representative container tag release renders repository-named evidence", (
   ]);
 });
 
+test("release artifact variants preserve default names and prevent multi-job collisions", () => {
+  const scenario = fixture("container-release.json");
+  const defaultRelease = renderReleaseContract(REUSABLE_RELEASE, scenario);
+  assert.deepEqual(defaultRelease.issues, []);
+  assert.equal(defaultRelease.artifactName, "fixture-container-v1.2.3");
+
+  const primary = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    expectedArtifactName: "fixture-container-v1.2.3-primary",
+    inputs: { ...scenario.inputs, "artifact-variant": "primary" },
+  });
+  const performance = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    expectedArtifactName: "fixture-container-v1.2.3-performance",
+    inputs: { ...scenario.inputs, "artifact-variant": "performance" },
+  });
+  assert.deepEqual(primary.issues, []);
+  assert.deepEqual(performance.issues, []);
+  assert.notEqual(primary.artifactName, performance.artifactName);
+
+  const defaultRuntime = runReleaseIdentityRuntime();
+  const primaryRuntime = runReleaseIdentityRuntime({ artifactVariant: "primary" });
+  const performanceRuntime = runReleaseIdentityRuntime({ artifactVariant: "performance" });
+  assert.equal(defaultRuntime.status, 0, defaultRuntime.stderr);
+  assert.equal(primaryRuntime.status, 0, primaryRuntime.stderr);
+  assert.equal(performanceRuntime.status, 0, performanceRuntime.stderr);
+  assert.match(defaultRuntime.output, /^artifact-name=fixture-container-v1\.2\.3$/m);
+  assert.match(primaryRuntime.output, /^artifact-name=fixture-container-v1\.2\.3-primary$/m);
+  assert.match(performanceRuntime.output, /^artifact-name=fixture-container-v1\.2\.3-performance$/m);
+});
+
+test("release artifact variants fail closed on unsafe or path-like suffixes", () => {
+  const scenario = fixture("container-release.json");
+  const invalidVariants = [
+    " ",
+    "Primary",
+    "-primary",
+    "primary-",
+    "primary--performance",
+    "primary_performance",
+    "primary.performance",
+    "primary/performance",
+    "../primary",
+    "primary\\performance",
+  ];
+  for (const artifactVariant of invalidVariants) {
+    const rendered = renderReleaseContract(REUSABLE_RELEASE, {
+      ...scenario,
+      inputs: { ...scenario.inputs, "artifact-variant": artifactVariant },
+    });
+    assert.ok(
+      rendered.issues.includes("artifact variant must be a lowercase hyphen-separated slug"),
+      JSON.stringify(artifactVariant),
+    );
+    const runtime = runReleaseIdentityRuntime({ artifactVariant });
+    assert.notEqual(runtime.status, 0, JSON.stringify(artifactVariant));
+    assert.match(runtime.stdout, /artifact-variant must be a lowercase hyphen-separated slug/);
+  }
+});
+
 test("detects each supported private-material pattern without echoing content", () => {
   const samples = [
     [["discogs", "ography"].join(""), "legacy-project-name"],
@@ -802,8 +899,15 @@ test("rejects repository, artifact, and image identity drift", () => {
       "repository identity guard",
     ],
     [
-      REUSABLE_RELEASE.replace("name: ${{ inputs.repository-name }}-${{ github.ref_name }}", "name: synthetic-artifact"),
-      "artifact naming",
+      REUSABLE_RELEASE.replace("name: ${{ steps.identity.outputs.artifact-name }}", "name: synthetic-artifact"),
+      "artifact identity",
+    ],
+    [
+      REUSABLE_RELEASE.replace(
+        '"${ARTIFACT_VARIANT}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$',
+        '"${ARTIFACT_VARIANT}" =~ .+',
+      ),
+      "artifact variant naming",
     ],
     [
       REUSABLE_RELEASE.replace("${{ steps.identity.outputs.image-name }}", "synthetic-image"),

@@ -28,6 +28,11 @@ on:
         description: Newline-separated release files covered by checksums and provenance.
         required: true
         type: string
+      artifact-variant:
+        description: Optional lowercase slug that distinguishes multiple release artifacts for one tag.
+        required: false
+        default: ""
+        type: string
       checksums-path:
         description: SHA-256 checksum manifest produced from locked release artifacts.
         required: false
@@ -110,6 +115,8 @@ jobs:
           ACTUAL_REPOSITORY_NAME: ${{ github.event.repository.name }}
           REVISION: ${{ github.sha }}
           IMAGE_VARIANT: ${{ inputs.image-variant }}
+          ARTIFACT_VARIANT: ${{ inputs.artifact-variant }}
+          TAG_NAME: ${{ github.ref_name }}
           PUBLISH_IMAGE: ${{ inputs.publish-image }}
         run: |
           if [[ "${EVENT_NAME}" != "push" || ! "${REF}" =~ ^refs/tags/v[0-9] ]]; then
@@ -128,11 +135,20 @@ jobs:
             echo "::error::image-variant must be a lowercase OCI name suffix"
             exit 1
           fi
+          if [[ -n "${ARTIFACT_VARIANT}" && ! "${ARTIFACT_VARIANT}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+            echo "::error::artifact-variant must be a lowercase hyphen-separated slug"
+            exit 1
+          fi
           image_name="${REPOSITORY_NAME}"
           if [[ -n "${IMAGE_VARIANT}" ]]; then
             image_name="${REPOSITORY_NAME}-${IMAGE_VARIANT}"
           fi
+          artifact_name="${REPOSITORY_NAME}-${TAG_NAME}"
+          if [[ -n "${ARTIFACT_VARIANT}" ]]; then
+            artifact_name="${artifact_name}-${ARTIFACT_VARIANT}"
+          fi
           echo "image-name=${image_name}" >> "${GITHUB_OUTPUT}"
+          echo "artifact-name=${artifact_name}" >> "${GITHUB_OUTPUT}"
 
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -232,7 +248,7 @@ jobs:
       - name: Retain repository-named release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.repository-name }}-${{ github.ref_name }}
+          name: ${{ steps.identity.outputs.artifact-name }}
           path: |
             ${{ inputs.artifact-path }}
             ${{ inputs.checksums-path }}

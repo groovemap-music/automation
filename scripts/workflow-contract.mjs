@@ -55,10 +55,23 @@ function parseJobs(content) {
     for (let stepIndex = 0; stepIndex < stepMatches.length; stepIndex += 1) {
       const stepMatch = stepMatches[stepIndex];
       const raw = block.slice(stepMatch.index, stepMatches[stepIndex + 1]?.index ?? block.length);
+      const withInputs = {};
+      let inWith = false;
+      for (const line of raw.split("\n")) {
+        if (/^        with:\s*$/.test(line)) {
+          inWith = true;
+          continue;
+        }
+        if (inWith && /^        \S/.test(line) && !/^          /.test(line)) break;
+        if (!inWith) continue;
+        const input = line.match(/^          ([A-Za-z0-9_-]+):\s*(.*)$/);
+        if (input) withInputs[input[1]] = parseScalar(input[2]);
+      }
       steps.push({
         name: stepMatch[1].trim(),
         condition: raw.match(/^        if:\s*(.+)$/m)?.[1]?.trim() ?? "",
         uses: raw.match(/^        uses:\s*([^\s#]+)/m)?.[1] ?? "",
+        with: withInputs,
         raw,
       });
     }
@@ -138,6 +151,143 @@ function conditionApplies(condition, inputs, actor) {
   return actorConditionApplies(condition, actor) && inputConditionApplies(condition, inputs);
 }
 
+function isExplicitRelativePath(value, { lcov = false } = {}) {
+  if (typeof value !== "string" || value === "" || value !== value.trim()) return false;
+  if (
+    /[\r\n,\\*?[\]{}]/.test(value)
+    || value.startsWith("/")
+    || value.startsWith("./")
+    || value.startsWith("!")
+    || value.endsWith("/")
+  ) return false;
+  if (value.split("/").includes("..")) return false;
+  if (value === "." || value.split("/").includes(".") || value.includes("//")) return false;
+  return !lcov || /\.(?:info|lcov)$/.test(value);
+}
+
+export function validateCoverageFiles(raw) {
+  if (typeof raw !== "string") {
+    return { issues: ["coverage-files must be a newline-separated string"], paths: [], codecovFiles: "" };
+  }
+  const paths = raw.split(/\r?\n/);
+  if (paths.at(-1) === "") paths.pop();
+  const issues = [];
+  const seen = new Set();
+  if (paths.length === 0) issues.push("coverage-files must contain at least one explicit path");
+  for (const [index, path] of paths.entries()) {
+    if (!isExplicitRelativePath(path)) {
+      issues.push(`coverage-files entry ${index} is not an explicit repository-relative path`);
+    } else if (seen.has(path)) {
+      issues.push(`coverage-files contains duplicate path: ${path}`);
+    } else {
+      seen.add(path);
+    }
+  }
+  return { issues, paths, codecovFiles: issues.length === 0 ? paths.join(",") : "" };
+}
+
+export function validateBrowserCoverageMapping(raw) {
+  const issues = [];
+  if (raw === "" || raw === undefined) {
+    return { issues, uploads: [], artifactPaths: [], lcovPaths: [], retainedPaths: [] };
+  }
+  if (typeof raw !== "string") {
+    return {
+      issues: ["browser-coverage-mapping must be a JSON string"],
+      uploads: [],
+      artifactPaths: [],
+      lcovPaths: [],
+      retainedPaths: [],
+    };
+  }
+
+  let mapping;
+  try {
+    mapping = JSON.parse(raw);
+  } catch {
+    return {
+      issues: ["browser-coverage-mapping must be valid JSON"],
+      uploads: [],
+      artifactPaths: [],
+      lcovPaths: [],
+      retainedPaths: [],
+    };
+  }
+  if (!Array.isArray(mapping) || mapping.length === 0) {
+    return {
+      issues: ["browser-coverage-mapping must be a nonempty JSON array"],
+      uploads: [],
+      artifactPaths: [],
+      lcovPaths: [],
+      retainedPaths: [],
+    };
+  }
+
+  const projects = new Set();
+  const lcovPaths = new Set();
+  const artifactPaths = new Set();
+  const uploads = [];
+  const retainedPaths = [];
+  const retainedPathSet = new Set();
+  const retain = (path) => {
+    if (!retainedPathSet.has(path)) {
+      retainedPathSet.add(path);
+      retainedPaths.push(path);
+    }
+  };
+  for (const [index, entry] of mapping.entries()) {
+    if (
+      !entry
+      || typeof entry !== "object"
+      || Array.isArray(entry)
+      || Object.keys(entry).sort().join("\0") !== ["artifacts", "lcov", "project"].join("\0")
+    ) {
+      issues.push(`browser-coverage-mapping entry ${index} must contain exactly project, lcov, and artifacts`);
+      continue;
+    }
+
+    const { project, lcov, artifacts } = entry;
+    if (typeof project !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(project)) {
+      issues.push(`browser-coverage-mapping entry ${index} has an invalid project flag`);
+    } else if (projects.has(project)) {
+      issues.push(`browser-coverage-mapping contains duplicate project: ${project}`);
+    } else {
+      projects.add(project);
+    }
+    if (!isExplicitRelativePath(lcov, { lcov: true })) {
+      issues.push(`browser-coverage-mapping entry ${index} needs one explicit LCOV file`);
+    } else if (lcovPaths.has(lcov)) {
+      issues.push(`browser-coverage-mapping contains duplicate LCOV file: ${lcov}`);
+    } else {
+      lcovPaths.add(lcov);
+      retain(lcov);
+    }
+    if (!Array.isArray(artifacts) || artifacts.length === 0) {
+      issues.push(`browser-coverage-mapping entry ${index} needs failure-artifact paths`);
+    } else {
+      for (const artifact of artifacts) {
+        if (!isExplicitRelativePath(artifact)) {
+          issues.push(`browser-coverage-mapping entry ${index} has a non-explicit failure-artifact path`);
+        } else if (artifactPaths.has(artifact)) {
+          issues.push(`browser-coverage-mapping contains duplicate artifact path: ${artifact}`);
+        } else {
+          artifactPaths.add(artifact);
+          retain(artifact);
+        }
+      }
+    }
+    uploads.push({ project, lcov, flag: `e2e-${project}` });
+  }
+
+  return {
+    issues,
+    uploads,
+    artifactPaths: [...artifactPaths],
+    lcovPaths: [...lcovPaths],
+    retainedPaths,
+  };
+}
+
 export function renderCiContract(content, scenario) {
   const definition = parseWorkflowDefinition(content);
   const call = validateWorkflowCall(definition, scenario.inputs);
@@ -155,6 +305,13 @@ export function renderCiContract(content, scenario) {
   if (call.inputs["e2e-command"] && !call.inputs["e2e-post-command"]) {
     issues.push("E2E post-processing is required when E2E is enabled");
   }
+  const browserCoverage = validateBrowserCoverageMapping(call.inputs["browser-coverage-mapping"]);
+  issues.push(...browserCoverage.issues);
+  const genericCoverage = validateCoverageFiles(call.inputs["coverage-files"]);
+  issues.push(...genericCoverage.issues);
+  if (call.inputs["browser-coverage-mapping"] && !call.inputs["e2e-command"]) {
+    issues.push("E2E command is required when browser coverage is configured");
+  }
 
   const jobs = definition.jobs
     .filter((job) => conditionApplies(job.condition, call.inputs, actor))
@@ -166,7 +323,47 @@ export function renderCiContract(content, scenario) {
         .filter((step) => conditionApplies(step.condition, call.inputs, actor))
         .map((step) => step.name),
     }));
-  return { issues, inputs: call.inputs, jobs };
+  const retainedCoveragePaths = [];
+  const retainedCoveragePathSet = new Set();
+  for (const path of [...genericCoverage.paths, ...browserCoverage.retainedPaths]) {
+    if (!retainedCoveragePathSet.has(path)) {
+      retainedCoveragePathSet.add(path);
+      retainedCoveragePaths.push(path);
+    }
+  }
+  const validateJob = definition.jobs.find((job) => job.id === "validate");
+  const genericUploadStep = validateJob?.steps.find((step) => step.name === "Upload coverage to Codecov");
+  const browserJob = definition.jobs.find((job) => job.id === "browser-codecov");
+  const browserUploadStep = browserJob?.steps.find((step) => step.name === "Upload browser coverage to Codecov");
+  const codecovUploads = [];
+  if (call.inputs["upload-codecov"]) {
+    codecovUploads.push({
+      scope: "generic",
+      files: genericCoverage.paths,
+      flags: call.inputs["coverage-flags"],
+      disableSearch: genericUploadStep?.with.disable_search === true,
+    });
+    for (const upload of browserCoverage.uploads) {
+      codecovUploads.push({
+        scope: upload.project,
+        files: [upload.lcov],
+        flags: upload.flag,
+        disableSearch: browserUploadStep?.with.disable_search === true,
+      });
+    }
+  }
+  return {
+    issues,
+    inputs: call.inputs,
+    jobs,
+    browserUploads: browserCoverage.uploads,
+    browserArtifactPaths: browserCoverage.artifactPaths,
+    browserLcovPaths: browserCoverage.lcovPaths,
+    coverageArtifactPaths: genericCoverage.paths,
+    retainedCoveragePaths,
+    codecovFiles: genericCoverage.codecovFiles,
+    codecovUploads,
+  };
 }
 
 function releaseEvidence(definition, publishImage) {

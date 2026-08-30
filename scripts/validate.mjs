@@ -39,6 +39,7 @@ const REQUIRED_FILES = [
   "docs/validation.md",
   "fixtures/contracts/container-ci.json",
   "fixtures/contracts/container-release.json",
+  "fixtures/contracts/browser-ci.json",
   "fixtures/contracts/node-ci.json",
   "fixtures/contracts/python-ci.json",
   "fixtures/contracts/rust-ci.json",
@@ -112,6 +113,13 @@ function requireAlwaysStep(errors, path, content, name, condition) {
   if (!block.includes(`if: ${condition}`)) errors.push(`${path}: ${name} must run with ${condition}`);
 }
 
+function requireStepMarkers(errors, path, content, name, markers) {
+  const block = stepBlock(content, name);
+  for (const marker of markers) {
+    if (!block.includes(marker)) errors.push(`${path}: ${name} must contain ${marker}`);
+  }
+}
+
 export function workflowContractIssues(path, content) {
   const errors = [];
   if (!content.includes("workflow_call:")) errors.push(`${path}: reusable interface must use workflow_call`);
@@ -143,6 +151,7 @@ export function workflowContractIssues(path, content) {
       "package-command:",
       "install-command:",
       "coverage-files:",
+      "browser-coverage-mapping:",
       "e2e-setup-command:",
       "e2e-instrument-command:",
       "e2e-command:",
@@ -156,11 +165,41 @@ export function workflowContractIssues(path, content) {
       "Scan repository and history for secrets",
       "Build package or application artifact",
       "Install and smoke-test built artifact",
+      "Stage workspace-relative coverage evidence",
+      "Restore workspace-relative coverage evidence",
       "if-no-files-found: error",
+      "include-hidden-files: true",
       "needs: validate",
       "test \"${VALIDATION_RESULT}\" = success",
       "^[0-9a-f]{40}$",
       "no reduced gate is available",
+      "upload: ${{ fromJSON(inputs.browser-coverage-mapping) }}",
+      "files: ${{ matrix.upload.lcov }}",
+      "flags: e2e-${{ matrix.upload.project }}",
+      "retained-coverage-paths-json",
+      "steps.stage-coverage.outputs.artifact-root",
+      "groovemap-coverage-artifact",
+      "groovemap-coverage-download",
+      "browser LCOV was not restored at its requested path",
+      "browser-mapping-valid",
+      "codecov-files",
+      "files: ${{ steps.interface.outputs.codecov-files }}",
+      "steps.interface.outcome == 'success'",
+      "needs.validate.outputs.browser-mapping-valid == 'true'",
+    ]);
+    const codecovUploads = [...content.matchAll(/^\s+uses:\s+codecov\/codecov-action@/gm)];
+    if (codecovUploads.length !== 2) {
+      errors.push(`${path}: exactly the generic and per-browser explicit Codecov uploads are allowed`);
+    }
+    requireStepMarkers(errors, path, content, "Upload coverage to Codecov", [
+      "files: ${{ steps.interface.outputs.codecov-files }}",
+      "flags: ${{ inputs.coverage-flags }}",
+      "disable_search: true",
+    ]);
+    requireStepMarkers(errors, path, content, "Upload browser coverage to Codecov", [
+      "files: ${{ matrix.upload.lcov }}",
+      "flags: e2e-${{ matrix.upload.project }}",
+      "disable_search: true",
     ]);
     requireAlwaysStep(
       errors,
@@ -169,8 +208,27 @@ export function workflowContractIssues(path, content) {
       "Run E2E post-processing and teardown",
       "always() && inputs.e2e-post-command != ''",
     );
-    requireAlwaysStep(errors, path, content, "Retain coverage evidence", "always()");
-    requireAlwaysStep(errors, path, content, "Upload coverage to Codecov", "always() && inputs.upload-codecov");
+    requireAlwaysStep(
+      errors,
+      path,
+      content,
+      "Stage workspace-relative coverage evidence",
+      "always() && steps.interface.outcome == 'success'",
+    );
+    requireAlwaysStep(
+      errors,
+      path,
+      content,
+      "Retain coverage evidence",
+      "always() && steps.stage-coverage.outcome == 'success'",
+    );
+    requireAlwaysStep(
+      errors,
+      path,
+      content,
+      "Upload coverage to Codecov",
+      "always() && inputs.upload-codecov && steps.interface.outcome == 'success'",
+    );
   }
 
   if (path.endsWith("reusable-release.yml")) {
@@ -315,7 +373,7 @@ function checkContractFixtures(errors) {
       if (JSON.stringify(ordinary.jobs) !== JSON.stringify(dependencyUpdate.jobs)) {
         errors.push(`${display}: Dependabot must render the identical job and step graph`);
       }
-      if (!ordinary.jobs.some((job) => job.id === "result" && job.needs === "validate")) {
+      if (!ordinary.jobs.some((job) => job.id === "result" && job.needs.includes("validate"))) {
         errors.push(`${display}: rendered CI contract must contain the fail-closed result job`);
       }
       if (fixture.capability === "container") {
@@ -330,7 +388,7 @@ function checkContractFixtures(errors) {
     }
   }
 
-  for (const capability of ["python", "rust", "node", "container", "tag-release"]) {
+  for (const capability of ["python", "rust", "node", "container", "browser", "tag-release"]) {
     if (!capabilities.has(capability)) errors.push(`fixtures/contracts: missing representative ${capability} fixture`);
   }
 }

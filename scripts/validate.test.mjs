@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -16,6 +27,8 @@ import {
   parseWorkflowDefinition,
   renderCiContract,
   renderReleaseContract,
+  validateBrowserCoverageMapping,
+  validateCoverageFiles,
   validateDependabotLabels,
   validateWorkflowCall,
   validateWorkflowSource,
@@ -27,6 +40,55 @@ const REUSABLE_RELEASE = readFileSync(resolve(ROOT, ".github/workflows/reusable-
 const DEPENDABOT = readFileSync(resolve(ROOT, ".github/dependabot.yml"), "utf8");
 const FIXTURE_ROOT = resolve(ROOT, "fixtures/contracts");
 const fixture = (name) => JSON.parse(readFileSync(resolve(FIXTURE_ROOT, name), "utf8"));
+
+function runInterfaceRuntime({
+  browserMapping = "",
+  coverageFiles = "coverage.xml",
+} = {}) {
+  const match = REUSABLE_CI.match(/          python3 - <<'PY'\n([\s\S]*?)\n          PY/);
+  assert.ok(match, "inline browser mapping validator must be present");
+  const script = match[1].split("\n").map((line) => line.slice(10)).join("\n");
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-browser-contract-"));
+  const output = resolve(directory, "github-output");
+  try {
+    const result = spawnSync("python3", ["-c", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        BROWSER_COVERAGE_MAPPING: browserMapping,
+        COVERAGE_FILES: coverageFiles,
+        GITHUB_OUTPUT: output,
+      },
+    });
+    return { ...result, output: result.status === 0 ? readFileSync(output, "utf8") : "" };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const runBrowserMappingRuntime = (browserMapping) => runInterfaceRuntime({ browserMapping });
+
+function inlinePythonForStep(stepName) {
+  const jobs = parseWorkflowDefinition(REUSABLE_CI).jobs;
+  const step = jobs.flatMap((job) => job.steps).find((candidate) => candidate.name === stepName);
+  assert.ok(step, `${stepName} must be present`);
+  const match = step.raw.match(/          python3 - <<'PY'\n([\s\S]*?)\n          PY/);
+  assert.ok(match, `${stepName} must contain one inline Python program`);
+  return match[1].split("\n").map((line) => line.slice(10)).join("\n");
+}
+
+function runWorkflowPythonStep(stepName, environment) {
+  return spawnSync("python3", ["-c", inlinePythonForStep(stepName)], {
+    encoding: "utf8",
+    env: { ...process.env, ...environment },
+  });
+}
+
+function jsonOutput(output, name) {
+  const match = output.match(new RegExp(`^${name}=(.*)$`, "m"));
+  assert.ok(match, `${name} JSON output must be present`);
+  return JSON.parse(match[1]);
+}
 
 test("extracts local and external Markdown links", () => {
   const markdown = "[docs](docs/README.md)\n[site](https://groovemap.music)\n";
@@ -49,8 +111,495 @@ test("representative Python, Rust, Node, and container calls render complete act
     assert.deepEqual(dependencyUpdate.issues, [], name);
     assert.deepEqual(dependencyUpdate.jobs, ordinary.jobs, name);
     assert.ok(ordinary.jobs.some((job) => job.id === "validate"), name);
-    assert.ok(ordinary.jobs.some((job) => job.id === "result" && job.needs === "validate"), name);
+    assert.ok(ordinary.jobs.some((job) => job.id === "result" && job.needs.includes("validate")), name);
+    assert.equal(ordinary.codecovFiles, scenario.inputs["coverage-files"].replaceAll("\n", ","), name);
   }
+});
+
+test("renders newline-separated artifact paths as deterministic explicit Codecov files", () => {
+  const coverageFiles = "coverage.xml\nfrontend/coverage/lcov.info\ncoverage/e2e/lcov.info";
+  const validated = validateCoverageFiles(coverageFiles);
+  assert.deepEqual(validated.issues, []);
+  assert.deepEqual(validated.paths, [
+    "coverage.xml",
+    "frontend/coverage/lcov.info",
+    "coverage/e2e/lcov.info",
+  ]);
+  assert.equal(validated.codecovFiles, "coverage.xml,frontend/coverage/lcov.info,coverage/e2e/lcov.info");
+
+  const runtime = runInterfaceRuntime({ coverageFiles });
+  assert.equal(runtime.status, 0, runtime.stderr);
+  assert.match(
+    runtime.output,
+    /^codecov-files=coverage\.xml,frontend\/coverage\/lcov\.info,coverage\/e2e\/lcov\.info$/m,
+  );
+
+  const validateJob = parseWorkflowDefinition(REUSABLE_CI).jobs.find((job) => job.id === "validate");
+  const staged = validateJob.steps.find((step) => step.name === "Stage workspace-relative coverage evidence");
+  const retained = validateJob.steps.find((step) => step.name === "Retain coverage evidence");
+  const uploaded = validateJob.steps.find((step) => step.name === "Upload coverage to Codecov");
+  assert.match(
+    staged.raw,
+    /RETAINED_COVERAGE_PATHS_JSON: \$\{\{ steps\.interface\.outputs\.retained-coverage-paths-json \}\}/,
+  );
+  assert.match(retained.raw, /^          path: \$\{\{ steps\.stage-coverage\.outputs\.artifact-root \}\}$/m);
+  assert.doesNotMatch(retained.raw, /\$\{\{ inputs\.coverage-files \}\}/);
+  assert.match(uploaded.raw, /^          files: \$\{\{ steps\.interface\.outputs\.codecov-files \}\}$/m);
+  assert.match(uploaded.raw, /^          disable_search: true$/m);
+  assert.doesNotMatch(uploaded.raw, /^          files: \$\{\{ inputs\.coverage-files \}\}$/m);
+
+  const crlf = runInterfaceRuntime({ coverageFiles: "coverage.xml\r\ncoverage/lcov.info\r\n" });
+  assert.equal(crlf.status, 0, crlf.stderr);
+  assert.match(crlf.output, /^codecov-files=coverage\.xml,coverage\/lcov\.info$/m);
+});
+
+test("rejects malformed generic coverage paths before artifact retention or Codecov upload", () => {
+  const cases = [
+    "",
+    "   ",
+    "coverage.xml\n\ncoverage/lcov.info",
+    "coverage/*.xml",
+    "coverage.xml,coverage/lcov.info",
+    "/tmp/coverage.xml",
+    "./coverage.xml",
+    "coverage/../coverage.xml",
+    "coverage//lcov.info",
+    "coverage/./lcov.info",
+    "coverage\\lcov.info",
+    "coverage.xml\rcoverage/lcov.info",
+    "coverage.xml\ncoverage.xml",
+    "!coverage.xml",
+    " !coverage.xml",
+    "\t!coverage.xml",
+    "!coverage.xml ",
+  ];
+  for (const coverageFiles of cases) {
+    assert.ok(validateCoverageFiles(coverageFiles).issues.length > 0, JSON.stringify(coverageFiles));
+    assert.notEqual(runInterfaceRuntime({ coverageFiles }).status, 0, JSON.stringify(coverageFiles));
+  }
+});
+
+test("model and runtime reject directory-like generic coverage paths with the same contract error", () => {
+  const invalid = "coverage/";
+  const expected = "coverage-files entry 0 is not an explicit repository-relative path";
+  assert.deepEqual(validateCoverageFiles(invalid).issues, [expected]);
+
+  const runtime = runInterfaceRuntime({ coverageFiles: invalid });
+  assert.notEqual(runtime.status, 0);
+  assert.equal(runtime.stderr.trim(), expected);
+
+  const nearbyFile = "coverage/report.xml";
+  assert.deepEqual(validateCoverageFiles(nearbyFile).issues, []);
+  assert.equal(runInterfaceRuntime({ coverageFiles: nearbyFile }).status, 0);
+});
+
+test("accepts canonical literal paths containing non-leading exclamation marks", () => {
+  const coverageFiles = "coverage/!literal.xml";
+  assert.deepEqual(validateCoverageFiles(coverageFiles).issues, []);
+  assert.equal(runInterfaceRuntime({ coverageFiles }).status, 0);
+
+  const browserMapping = JSON.stringify([
+    {
+      project: "chromium",
+      lcov: "coverage/e2e/!literal.lcov",
+      artifacts: ["test-results/!literal"],
+    },
+  ]);
+  assert.deepEqual(validateBrowserCoverageMapping(browserMapping).issues, []);
+  assert.equal(runBrowserMappingRuntime(browserMapping).status, 0);
+});
+
+test("renders five isolated Graph Explorer browser uploads with retained project evidence", () => {
+  const scenario = fixture("browser-ci.json");
+  const ordinary = renderCiContract(REUSABLE_CI, scenario);
+  const dependencyUpdate = renderCiContract(REUSABLE_CI, { ...scenario, actor: "dependabot[bot]" });
+  assert.deepEqual(ordinary.issues, []);
+  assert.deepEqual(dependencyUpdate.jobs, ordinary.jobs);
+  assert.deepEqual(ordinary.browserUploads, [
+    { project: "chromium", lcov: "coverage/e2e/chromium/lcov.info", flag: "e2e-chromium" },
+    { project: "firefox", lcov: "coverage/e2e/firefox/lcov.info", flag: "e2e-firefox" },
+    { project: "webkit", lcov: "coverage/e2e/webkit/lcov.info", flag: "e2e-webkit" },
+    { project: "iphone", lcov: "coverage/e2e/iphone/lcov.info", flag: "e2e-iphone" },
+    { project: "ipad", lcov: "coverage/e2e/ipad/lcov.info", flag: "e2e-ipad" },
+  ]);
+  const expectedLcov = ordinary.browserUploads.map(({ lcov }) => lcov);
+  assert.deepEqual(ordinary.browserLcovPaths, expectedLcov);
+  assert.equal(ordinary.browserArtifactPaths.length, 10);
+  assert.equal(ordinary.retainedCoveragePaths.length, 18);
+  for (const { lcov } of ordinary.browserUploads) {
+    assert.ok(ordinary.retainedCoveragePaths.includes(lcov), `${lcov} must be retained before matrix upload`);
+  }
+  for (const path of ordinary.browserArtifactPaths) {
+    assert.ok(ordinary.retainedCoveragePaths.includes(path), `${path} must be retained as failure evidence`);
+  }
+  assert.deepEqual(ordinary.codecovUploads, [
+    {
+      scope: "generic",
+      files: ["coverage.xml", "explore/coverage/lcov.info", "coverage/e2e/lcov.info"],
+      flags: "python,javascript,e2e,explorer",
+      disableSearch: true,
+    },
+    ...ordinary.browserUploads.map(({ project, lcov, flag }) => ({
+      scope: project,
+      files: [lcov],
+      flags: flag,
+      disableSearch: true,
+    })),
+  ]);
+  assert.ok(ordinary.jobs.some((job) => job.id === "browser-codecov"));
+
+  const validateJob = parseWorkflowDefinition(REUSABLE_CI).jobs.find((job) => job.id === "validate");
+  const retained = validateJob.steps.find((step) => step.name === "Retain coverage evidence");
+  const browserJob = parseWorkflowDefinition(REUSABLE_CI).jobs.find((job) => job.id === "browser-codecov");
+  const download = browserJob.steps.find((step) => step.name === "Download retained coverage evidence");
+  const restore = browserJob.steps.find((step) => step.name === "Restore workspace-relative coverage evidence");
+  const upload = browserJob.steps.find((step) => step.name === "Upload browser coverage to Codecov");
+  assert.match(retained.raw, /name: \$\{\{ github\.event\.repository\.name \}\}-coverage-\$\{\{ github\.run_id \}\}/);
+  assert.match(download.raw, /name: \$\{\{ github\.event\.repository\.name \}\}-coverage-\$\{\{ github\.run_id \}\}/);
+  assert.match(restore.raw, /BROWSER_LCOV_PATH: \$\{\{ matrix\.upload\.lcov \}\}/);
+  assert.match(restore.raw, /browser LCOV was not restored at its requested path/);
+  assert.match(upload.raw, /^          files: \$\{\{ matrix\.upload\.lcov \}\}$/m);
+  assert.match(upload.raw, /^          flags: e2e-\$\{\{ matrix\.upload\.project \}\}$/m);
+  assert.match(upload.raw, /^          disable_search: true$/m);
+  assert.doesNotMatch(upload.raw, /inputs\.coverage-(?:files|flags)/);
+});
+
+test("restoring every retained report cannot broaden an explicit Codecov upload", () => {
+  const scenario = fixture("browser-ci.json");
+  const rendered = renderCiContract(REUSABLE_CI, scenario);
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-codecov-isolation-"));
+  const sourceWorkspace = resolve(directory, "source-workspace");
+  const restoredWorkspace = resolve(directory, "restored-workspace");
+  const runnerTemp = resolve(directory, "runner-temp");
+  try {
+    mkdirSync(sourceWorkspace, { recursive: true });
+    mkdirSync(runnerTemp, { recursive: true });
+    for (const retainedPath of rendered.retainedCoveragePaths) {
+      const destination = resolve(sourceWorkspace, retainedPath);
+      if (retainedPath.includes("test-results/") || retainedPath.includes("coverage/e2e/raw/")) {
+        mkdirSync(destination, { recursive: true });
+        writeFileSync(resolve(destination, "evidence.txt"), `${retainedPath}\n`);
+      } else {
+        mkdirSync(dirname(destination), { recursive: true });
+        writeFileSync(destination, `${retainedPath}\n`);
+      }
+    }
+
+    const staged = runWorkflowPythonStep("Stage workspace-relative coverage evidence", {
+      GITHUB_OUTPUT: resolve(directory, "github-output"),
+      GITHUB_WORKSPACE: sourceWorkspace,
+      RETAINED_COVERAGE_PATHS_JSON: JSON.stringify(rendered.retainedCoveragePaths),
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.equal(staged.status, 0, staged.stderr);
+    const stagingRoot = resolve(runnerTemp, "groovemap-coverage-artifact");
+    const downloadRoot = resolve(runnerTemp, "groovemap-coverage-download");
+    mkdirSync(downloadRoot, { recursive: true });
+    cpSync(resolve(stagingRoot, "manifest.json"), resolve(downloadRoot, "manifest.json"));
+    cpSync(resolve(stagingRoot, "workspace"), resolve(downloadRoot, "workspace"), { recursive: true });
+    mkdirSync(restoredWorkspace, { recursive: true });
+
+    const restored = runWorkflowPythonStep("Restore workspace-relative coverage evidence", {
+      BROWSER_LCOV_PATH: "coverage/e2e/chromium/lcov.info",
+      GITHUB_WORKSPACE: restoredWorkspace,
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.equal(restored.status, 0, restored.stderr);
+    for (const retainedPath of rendered.retainedCoveragePaths) {
+      assert.equal(existsSync(resolve(restoredWorkspace, retainedPath)), true, retainedPath);
+    }
+
+    assert.deepEqual(rendered.codecovUploads[0].files, [
+      "coverage.xml",
+      "explore/coverage/lcov.info",
+      "coverage/e2e/lcov.info",
+    ]);
+    assert.equal(rendered.codecovUploads[0].disableSearch, true);
+    for (const upload of rendered.codecovUploads.slice(1)) {
+      assert.deepEqual(upload.files, [`coverage/e2e/${upload.scope}/lcov.info`]);
+      assert.equal(upload.flags, `e2e-${upload.scope}`);
+      assert.equal(upload.disableSearch, true);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("nested-only artifact roundtrip restores the browser LCOV at its exact requested path", () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-coverage-roundtrip-"));
+  const sourceWorkspace = resolve(directory, "source-workspace");
+  const restoredWorkspace = resolve(directory, "restored-workspace");
+  const runnerTemp = resolve(directory, "runner-temp");
+  const output = resolve(directory, "github-output");
+  const retainedPaths = [
+    "coverage/unit.xml",
+    "coverage/e2e/chromium/lcov.info",
+    "coverage/e2e/chromium/results",
+  ];
+  try {
+    mkdirSync(resolve(sourceWorkspace, "coverage/e2e/chromium/results"), { recursive: true });
+    writeFileSync(resolve(sourceWorkspace, "coverage/unit.xml"), "<coverage/>\n");
+    writeFileSync(resolve(sourceWorkspace, "coverage/e2e/chromium/lcov.info"), "TN:\n");
+    writeFileSync(resolve(sourceWorkspace, "coverage/e2e/chromium/results/trace.txt"), "trace\n");
+    mkdirSync(runnerTemp, { recursive: true });
+
+    const staged = runWorkflowPythonStep("Stage workspace-relative coverage evidence", {
+      GITHUB_OUTPUT: output,
+      GITHUB_WORKSPACE: sourceWorkspace,
+      RETAINED_COVERAGE_PATHS_JSON: JSON.stringify(retainedPaths),
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.equal(staged.status, 0, staged.stderr);
+    const stagingRoot = resolve(runnerTemp, "groovemap-coverage-artifact");
+    const manifest = JSON.parse(readFileSync(resolve(stagingRoot, "manifest.json"), "utf8"));
+    assert.deepEqual(manifest.retained_paths, retainedPaths);
+    assert.deepEqual(manifest.archived_paths, retainedPaths);
+
+    const downloadRoot = resolve(runnerTemp, "groovemap-coverage-download");
+    mkdirSync(downloadRoot, { recursive: true });
+    // upload-artifact archives the contents of its single directory input, not that root itself.
+    cpSync(resolve(stagingRoot, "manifest.json"), resolve(downloadRoot, "manifest.json"));
+    cpSync(resolve(stagingRoot, "workspace"), resolve(downloadRoot, "workspace"), { recursive: true });
+    mkdirSync(restoredWorkspace, { recursive: true });
+
+    const restored = runWorkflowPythonStep("Restore workspace-relative coverage evidence", {
+      BROWSER_LCOV_PATH: "coverage/e2e/chromium/lcov.info",
+      GITHUB_WORKSPACE: restoredWorkspace,
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(readFileSync(resolve(restoredWorkspace, "coverage/e2e/chromium/lcov.info"), "utf8"), "TN:\n");
+    assert.equal(readFileSync(resolve(restoredWorkspace, "coverage/unit.xml"), "utf8"), "<coverage/>\n");
+    assert.equal(
+      readFileSync(resolve(restoredWorkspace, "coverage/e2e/chromium/results/trace.txt"), "utf8"),
+      "trace\n",
+    );
+    assert.equal(existsSync(resolve(restoredWorkspace, "e2e/chromium/lcov.info")), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("coverage artifact staging and restore fail closed on symlink traversal and collisions", () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-coverage-safety-"));
+  const sourceWorkspace = resolve(directory, "source-workspace");
+  const restoredWorkspace = resolve(directory, "restored-workspace");
+  const runnerTemp = resolve(directory, "runner-temp");
+  try {
+    mkdirSync(resolve(sourceWorkspace, "coverage"), { recursive: true });
+    mkdirSync(runnerTemp, { recursive: true });
+    writeFileSync(resolve(directory, "outside.info"), "TN:\n");
+    symlinkSync(resolve(directory, "outside.info"), resolve(sourceWorkspace, "coverage/lcov.info"));
+    const unsafeStage = runWorkflowPythonStep("Stage workspace-relative coverage evidence", {
+      GITHUB_OUTPUT: resolve(directory, "unsafe-output"),
+      GITHUB_WORKSPACE: sourceWorkspace,
+      RETAINED_COVERAGE_PATHS_JSON: JSON.stringify(["coverage/lcov.info"]),
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.notEqual(unsafeStage.status, 0);
+    assert.match(unsafeStage.stderr, /must not traverse symlinks/);
+
+    rmSync(sourceWorkspace, { recursive: true, force: true });
+    mkdirSync(resolve(sourceWorkspace, "coverage"), { recursive: true });
+    writeFileSync(resolve(sourceWorkspace, "coverage/lcov.info"), "TN:\n");
+    const safeStage = runWorkflowPythonStep("Stage workspace-relative coverage evidence", {
+      GITHUB_OUTPUT: resolve(directory, "safe-output"),
+      GITHUB_WORKSPACE: sourceWorkspace,
+      RETAINED_COVERAGE_PATHS_JSON: JSON.stringify(["coverage/lcov.info"]),
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.equal(safeStage.status, 0, safeStage.stderr);
+    const stagingRoot = resolve(runnerTemp, "groovemap-coverage-artifact");
+    const downloadRoot = resolve(runnerTemp, "groovemap-coverage-download");
+    mkdirSync(downloadRoot, { recursive: true });
+    cpSync(resolve(stagingRoot, "manifest.json"), resolve(downloadRoot, "manifest.json"));
+    cpSync(resolve(stagingRoot, "workspace"), resolve(downloadRoot, "workspace"), { recursive: true });
+
+    mkdirSync(resolve(restoredWorkspace, "coverage"), { recursive: true });
+    const collision = runWorkflowPythonStep("Restore workspace-relative coverage evidence", {
+      BROWSER_LCOV_PATH: "coverage/lcov.info",
+      GITHUB_WORKSPACE: restoredWorkspace,
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.notEqual(collision.status, 0);
+    assert.match(collision.stderr, /collides with workspace path/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps callers without browser coverage backward compatible", () => {
+  for (const name of ["python-ci.json", "rust-ci.json", "node-ci.json", "container-ci.json"]) {
+    const rendered = renderCiContract(REUSABLE_CI, fixture(name));
+    assert.deepEqual(rendered.issues, [], name);
+    assert.deepEqual(rendered.browserUploads, [], name);
+    assert.deepEqual(rendered.browserArtifactPaths, [], name);
+    assert.deepEqual(rendered.browserLcovPaths, [], name);
+    assert.deepEqual(rendered.retainedCoveragePaths, rendered.coverageArtifactPaths, name);
+    assert.ok(!rendered.jobs.some((job) => job.id === "browser-codecov"), name);
+  }
+});
+
+test("rejects empty, malformed, globbed, and old multi-flag browser mappings", () => {
+  const valid = JSON.parse(fixture("browser-ci.json").inputs["browser-coverage-mapping"]);
+  const cases = [
+    "[]",
+    "not-json",
+    JSON.stringify([{ ...valid[0], project: "chromium,firefox" }]),
+    JSON.stringify([{ ...valid[0], project: "chromium\nfirefox" }]),
+    JSON.stringify([{ ...valid[0], lcov: "coverage/e2e/*/lcov.info" }]),
+    JSON.stringify([{ ...valid[0], lcov: "coverage/e2e/chromium/lcov.info\ncoverage/e2e/firefox/lcov.info" }]),
+    JSON.stringify([{ ...valid[0], artifacts: ["test-results/**/*"] }]),
+    JSON.stringify([{ ...valid[0], lcov: "!coverage/e2e/chromium/lcov.info" }]),
+    JSON.stringify([{ ...valid[0], lcov: " !coverage/e2e/chromium/lcov.info" }]),
+    JSON.stringify([{ ...valid[0], lcov: "!coverage/e2e/chromium/lcov.info " }]),
+    JSON.stringify([{ ...valid[0], artifacts: ["!test-results/chromium"] }]),
+    JSON.stringify([{ ...valid[0], artifacts: ["\t!test-results/chromium"] }]),
+    JSON.stringify([{ ...valid[0], artifacts: ["!test-results/chromium "] }]),
+    JSON.stringify([valid[0], { ...valid[0], project: "firefox" }]),
+  ];
+  for (const mapping of cases) {
+    assert.ok(validateBrowserCoverageMapping(mapping).issues.length > 0, mapping);
+    assert.notEqual(runBrowserMappingRuntime(mapping).status, 0, mapping);
+  }
+});
+
+test("model and runtime reject trailing-slash browser artifact paths while accepting canonical paths", () => {
+  const base = JSON.parse(fixture("browser-ci.json").inputs["browser-coverage-mapping"])[0];
+  const invalid = JSON.stringify([{ ...base, artifacts: ["test-results/chromium/"] }]);
+  const expected = "browser-coverage-mapping entry 0 has a non-explicit failure-artifact path";
+  assert.deepEqual(validateBrowserCoverageMapping(invalid).issues, [expected]);
+
+  const runtime = runBrowserMappingRuntime(invalid);
+  assert.notEqual(runtime.status, 0);
+  assert.equal(runtime.stderr.trim(), expected);
+
+  const valid = JSON.stringify([{
+    ...base,
+    lcov: "coverage/e2e/chromium/lcov.info",
+    artifacts: ["test-results/chromium"],
+  }]);
+  assert.deepEqual(validateBrowserCoverageMapping(valid).issues, []);
+  assert.equal(runBrowserMappingRuntime(valid).status, 0);
+
+  const directoryLikeLcov = JSON.stringify([{ ...base, lcov: "coverage/e2e/chromium/lcov.info/" }]);
+  assert.deepEqual(validateBrowserCoverageMapping(directoryLikeLcov).issues, [
+    "browser-coverage-mapping entry 0 needs one explicit LCOV file",
+  ]);
+  assert.equal(
+    runBrowserMappingRuntime(directoryLikeLcov).stderr.trim(),
+    "browser-coverage-mapping entry 0 needs one explicit LCOV file",
+  );
+});
+
+test("runtime retains generic reports, all five mapped LCOVs, and mapped failure evidence", () => {
+  const mapping = fixture("browser-ci.json").inputs["browser-coverage-mapping"];
+  const result = runBrowserMappingRuntime(mapping);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.output, /browser-mapping-valid=true/);
+  const retainedPaths = jsonOutput(result.output, "retained-coverage-paths-json");
+  assert.deepEqual(retainedPaths.slice(0, 1), ["coverage.xml"]);
+  for (const project of ["chromium", "firefox", "webkit", "iphone", "ipad"]) {
+    assert.ok(retainedPaths.includes(`coverage/e2e/${project}/lcov.info`), `${project} LCOV must be retained`);
+    assert.ok(retainedPaths.includes(`test-results/${project}`), `${project} test results must be retained`);
+    assert.ok(retainedPaths.includes(`coverage/e2e/raw/${project}`), `${project} raw coverage must be retained`);
+  }
+  assert.equal(retainedPaths.length, 16);
+});
+
+test("retained-path JSON crosses the workflow output boundary when paths equal the former delimiter", () => {
+  const browserMapping = JSON.stringify([{
+    project: "chromium",
+    lcov: "coverage/e2e/chromium/lcov.info",
+    artifacts: ["RETAINED_COVERAGE_PATHS"],
+  }]);
+  const scenarios = [
+    {
+      name: "generic",
+      coverageFiles: "RETAINED_COVERAGE_PATHS\ncoverage.xml",
+      browserMapping: "",
+    },
+    {
+      name: "browser",
+      coverageFiles: "coverage.xml",
+      browserMapping,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const fixtureScenario = fixture("browser-ci.json");
+    const rendered = renderCiContract(REUSABLE_CI, {
+      ...fixtureScenario,
+      inputs: {
+        ...fixtureScenario.inputs,
+        "browser-coverage-mapping": scenario.browserMapping,
+        "coverage-files": scenario.coverageFiles,
+      },
+    });
+    assert.deepEqual(rendered.issues, [], scenario.name);
+    assert.ok(rendered.retainedCoveragePaths.includes("RETAINED_COVERAGE_PATHS"), scenario.name);
+
+    const runtime = runInterfaceRuntime({
+      browserMapping: scenario.browserMapping,
+      coverageFiles: scenario.coverageFiles,
+    });
+    assert.equal(runtime.status, 0, runtime.stderr);
+    assert.doesNotMatch(runtime.output, /<<RETAINED_COVERAGE_PATHS/);
+    const retainedPaths = jsonOutput(runtime.output, "retained-coverage-paths-json");
+    assert.deepEqual(retainedPaths, rendered.retainedCoveragePaths, scenario.name);
+
+    const directory = mkdtempSync(resolve(tmpdir(), `groovemap-output-boundary-${scenario.name}-`));
+    const workspace = resolve(directory, "workspace");
+    const runnerTemp = resolve(directory, "runner-temp");
+    try {
+      mkdirSync(workspace, { recursive: true });
+      mkdirSync(runnerTemp, { recursive: true });
+      for (const retainedPath of retainedPaths) {
+        const destination = resolve(workspace, retainedPath);
+        mkdirSync(dirname(destination), { recursive: true });
+        writeFileSync(destination, `${retainedPath}\n`);
+      }
+      const staged = runWorkflowPythonStep("Stage workspace-relative coverage evidence", {
+        GITHUB_OUTPUT: resolve(directory, "github-output"),
+        GITHUB_WORKSPACE: workspace,
+        RETAINED_COVERAGE_PATHS_JSON: JSON.stringify(retainedPaths),
+        RUNNER_TEMP: runnerTemp,
+      });
+      assert.equal(staged.status, 0, staged.stderr);
+      const manifest = JSON.parse(
+        readFileSync(resolve(runnerTemp, "groovemap-coverage-artifact/manifest.json"), "utf8"),
+      );
+      assert.deepEqual(manifest.retained_paths, rendered.retainedCoveragePaths, scenario.name);
+      assert.ok(manifest.archived_paths.includes("RETAINED_COVERAGE_PATHS"), scenario.name);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime and model deduplicate overlap while preserving deterministic retained-path order", () => {
+  const scenario = fixture("browser-ci.json");
+  const firstLcov = "coverage/e2e/chromium/lcov.info";
+  const coverageFiles = `coverage.xml\n${firstLcov}`;
+  const rendered = renderCiContract(REUSABLE_CI, {
+    ...scenario,
+    inputs: { ...scenario.inputs, "coverage-files": coverageFiles },
+  });
+  const result = runInterfaceRuntime({
+    browserMapping: scenario.inputs["browser-coverage-mapping"],
+    coverageFiles,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const runtimePaths = jsonOutput(result.output, "retained-coverage-paths-json");
+  assert.deepEqual(runtimePaths, rendered.retainedCoveragePaths);
+  assert.deepEqual(runtimePaths.slice(0, 4), [
+    "coverage.xml",
+    firstLcov,
+    "test-results/chromium",
+    "coverage/e2e/raw/chromium",
+  ]);
+  assert.equal(runtimePaths.filter((path) => path === firstLcov).length, 1);
+  for (const { lcov } of rendered.browserUploads) assert.ok(runtimePaths.includes(lcov), lcov);
 });
 
 test("representative container tag release renders repository-named evidence", () => {
@@ -157,7 +706,7 @@ test("rejects loss of always-run coverage retention and upload", () => {
     "- name: Retain coverage evidence\n        if: success()",
   );
   const withoutUpload = REUSABLE_CI.replace(
-    "if: always() && inputs.upload-codecov",
+    "if: always() && inputs.upload-codecov && steps.interface.outcome == 'success'",
     "if: inputs.upload-codecov",
   );
   assert.notEqual(withoutRetention, REUSABLE_CI);
@@ -172,6 +721,36 @@ test("rejects loss of always-run coverage retention and upload", () => {
       (issue) => issue.includes("Upload coverage to Codecov") && issue.includes("always()"),
     ),
   );
+});
+
+test("rejects Codecov uploads that can discover reports beyond their validated explicit file list", () => {
+  const genericSearchEnabled = REUSABLE_CI.replace(
+    "files: ${{ steps.interface.outputs.codecov-files }}\n          flags: ${{ inputs.coverage-flags }}\n          disable_search: true",
+    "files: ${{ steps.interface.outputs.codecov-files }}\n          flags: ${{ inputs.coverage-flags }}\n          disable_search: false",
+  );
+  const browserSearchEnabled = REUSABLE_CI.replace(
+    "files: ${{ matrix.upload.lcov }}\n          flags: e2e-${{ matrix.upload.project }}\n          disable_search: true",
+    "files: ${{ matrix.upload.lcov }}\n          flags: e2e-${{ matrix.upload.project }}\n          disable_search: false",
+  );
+  const implicitExtraUpload = REUSABLE_CI.replace(
+    "  result:\n",
+    "      - name: Upload discovered coverage to Codecov\n"
+      + "        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f\n\n"
+      + "  result:\n",
+  );
+  for (const source of [genericSearchEnabled, browserSearchEnabled, implicitExtraUpload]) {
+    assert.notEqual(source, REUSABLE_CI);
+    assert.ok(
+      workflowContractIssues(".github/workflows/reusable-ci.yml", source).some(
+        (issue) => issue.includes("explicit Codecov uploads") || issue.includes("disable_search: true"),
+      ),
+    );
+  }
+
+  const renderedGeneric = renderCiContract(genericSearchEnabled, fixture("browser-ci.json"));
+  const renderedBrowsers = renderCiContract(browserSearchEnabled, fixture("browser-ci.json"));
+  assert.equal(renderedGeneric.codecovUploads[0].disableSearch, false);
+  assert.ok(renderedBrowsers.codecovUploads.slice(1).every((upload) => !upload.disableSearch));
 });
 
 test("rejects a private-library checkout outside the fleet exclusion path", () => {

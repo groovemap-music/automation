@@ -1,0 +1,24 @@
+{
+  "kind": "ci",
+  "capability": "browser",
+  "actor": "synthetic-developer",
+  "inputs": {
+    "language": "mixed",
+    "setup-command": "just setup",
+    "check-command": "just check",
+    "coverage-command": "just coverage",
+    "audit-command": "just audit",
+    "license-command": "just license-check",
+    "secret-scan-command": "just security",
+    "package-command": "just build",
+    "install-command": "just install-check",
+    "e2e-setup-command": "just e2e-setup",
+    "e2e-instrument-command": "just e2e-instrument",
+    "e2e-command": "just e2e-run",
+    "e2e-post-command": "just e2e-post",
+    "coverage-files": "coverage.xml\nexplore/coverage/lcov.info\ncoverage/e2e/lcov.info",
+    "coverage-flags": "python,javascript,e2e,explorer",
+    "browser-coverage-mapping": "[{\"project\":\"chromium\",\"lcov\":\"coverage/e2e/chromium/lcov.info\",\"artifacts\":[\"test-results/chromium\",\"coverage/e2e/raw/chromium\"]},{\"project\":\"firefox\",\"lcov\":\"coverage/e2e/firefox/lcov.info\",\"artifacts\":[\"test-results/firefox\",\"coverage/e2e/raw/firefox\"]},{\"project\":\"webkit\",\"lcov\":\"coverage/e2e/webkit/lcov.info\",\"artifacts\":[\"test-results/webkit\",\"coverage/e2e/raw/webkit\"]},{\"project\":\"iphone\",\"lcov\":\"coverage/e2e/iphone/lcov.info\",\"artifacts\":[\"test-results/iphone\",\"coverage/e2e/raw/iphone\"]},{\"project\":\"ipad\",\"lcov\":\"coverage/e2e/ipad/lcov.info\",\"artifacts\":[\"test-results/ipad\",\"coverage/e2e/raw/ipad\"]}]",
+    "upload-codecov": true
+  }
+}

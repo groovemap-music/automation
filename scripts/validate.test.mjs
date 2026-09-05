@@ -1333,3 +1333,35 @@ test("cache statistics survive a failed validation step", () => {
 test("current repository satisfies the complete shared automation contract", () => {
   assert.deepEqual(validate(), []);
 });
+
+// --- file enumeration honours git's ignore rules (gm-automation-yoa.2) ---
+
+test("the exposure scan skips a locally git-ignored directory but still reports an unignored match", () => {
+  const excludePath = spawnSync("git", ["rev-parse", "--git-path", "info/exclude"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  }).stdout.trim();
+  const originalExclude = readFileSync(excludePath, "utf8");
+  const ignoredDir = resolve(ROOT, ".tmp-validate-ignored-check");
+  const visibleDir = resolve(ROOT, ".tmp-validate-visible-check");
+  const ignoredMarker = ["customer", "id=ignored-741"].join("_");
+  const visibleMarker = ["customer", "id=visible-741"].join("_");
+  try {
+    mkdirSync(ignoredDir, { recursive: true });
+    writeFileSync(resolve(ignoredDir, "note.txt"), ignoredMarker);
+    writeFileSync(excludePath, `${originalExclude}\n/.tmp-validate-ignored-check/\n`);
+
+    mkdirSync(visibleDir, { recursive: true });
+    writeFileSync(resolve(visibleDir, "note.txt"), visibleMarker);
+
+    const errors = validate();
+    assert.ok(!errors.some((error) => error.includes(".tmp-validate-ignored-check")));
+    assert.ok(
+      errors.some((error) => error.includes(".tmp-validate-visible-check") && error.includes("customer-record")),
+    );
+  } finally {
+    writeFileSync(excludePath, originalExclude);
+    rmSync(ignoredDir, { recursive: true, force: true });
+    rmSync(visibleDir, { recursive: true, force: true });
+  }
+});

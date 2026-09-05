@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -72,15 +73,54 @@ const EXPOSURE_PATTERNS = [
   ["private-planning-path", /(?:\.planning\/|docs\/superpowers\/)/i],
 ];
 
+const SKIPPED_DIRECTORIES = new Set([".git", ".build", "node_modules"]);
+
+function isSkippedRelativePath(relativePath) {
+  return relativePath.split("/").some((segment) => SKIPPED_DIRECTORIES.has(segment));
+}
+
 function walk(directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if ([".git", ".build", "node_modules"].includes(entry.name)) continue;
+    if (SKIPPED_DIRECTORIES.has(entry.name)) continue;
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) files.push(...walk(path));
     else if (entry.isFile()) files.push(path);
   }
   return files;
+}
+
+// Enumerates candidate files the way `git` sees them (tracked plus untracked-but-not-ignored),
+// so a locally ignored directory (e.g. excluded via .git/info/exclude) is never scanned on a
+// developer machine even though CI, which starts from a clean checkout, would never see it
+// either way. Falls back to a plain directory walk when git is unavailable or `root` isn't a
+// repository; the explicit skip list still guards both paths.
+function listGitFiles(root) {
+  const output = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  );
+  return output
+    .split("\0")
+    .filter(Boolean)
+    .filter((relativePath) => !isSkippedRelativePath(relativePath))
+    .map((relativePath) => resolve(root, relativePath))
+    .filter((path) => {
+      try {
+        return lstatSync(path).isFile();
+      } catch {
+        return false;
+      }
+    });
+}
+
+function enumerateFiles(root) {
+  try {
+    return listGitFiles(root);
+  } catch {
+    return walk(root);
+  }
 }
 
 export function extractLinks(markdown) {
@@ -336,7 +376,7 @@ function checkRequiredFiles(errors) {
 }
 
 function checkMarkdown(errors) {
-  for (const path of walk(ROOT).filter((file) => file.endsWith(".md"))) {
+  for (const path of enumerateFiles(ROOT).filter((file) => file.endsWith(".md"))) {
     const display = relative(ROOT, path);
     const content = readFileSync(path, "utf8");
     if (!content.endsWith("\n")) errors.push(`${display}: missing final newline`);
@@ -463,7 +503,7 @@ function checkExposure(errors, files) {
 
 export function validate() {
   const errors = [];
-  const files = walk(ROOT);
+  const files = enumerateFiles(ROOT);
   checkRequiredFiles(errors);
   checkMarkdown(errors);
   checkLegalBoundary(errors);

@@ -336,6 +336,52 @@ export function validateBrowserCoverageMapping(raw) {
   };
 }
 
+export function validateBuildkitCacheMounts(raw) {
+  if (raw === "" || raw === undefined) return { issues: [], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
+  if (typeof raw !== "string") {
+    return { issues: ["buildkit-cache-mounts must be a JSON string"], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { issues: ["buildkit-cache-mounts must be valid JSON"], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length === 0) {
+    return {
+      issues: ["buildkit-cache-mounts must be a nonempty JSON object"],
+      mounts: [],
+      cacheMap: {},
+      paths: [],
+      keyPrefix: "",
+    };
+  }
+
+  const issues = [];
+  const mounts = [];
+  const cacheMap = {};
+  const paths = [];
+  for (const identifier of Object.keys(parsed).sort()) {
+    const target = parsed[identifier];
+    if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(identifier)) {
+      issues.push(`buildkit-cache-mounts id must be a lowercase slug: ${identifier}`);
+      continue;
+    }
+    if (typeof target !== "string" || !target.startsWith("/") || target.split("/").includes("..") || target.trim() !== target) {
+      issues.push(`buildkit-cache-mounts target must be an absolute container path: ${identifier}`);
+      continue;
+    }
+    const path = `.buildkit-cache/${identifier}`;
+    mounts.push({ id: identifier, target, path });
+    cacheMap[path] = target;
+    paths.push(path);
+  }
+
+  const keyPrefix = issues.length === 0 ? `buildkit-mounts-${Object.keys(parsed).sort().join("-")}` : "";
+  return { issues, mounts, cacheMap, paths, keyPrefix };
+}
+
 export function renderCiContract(content, scenario) {
   const definition = parseWorkflowDefinition(content);
   const call = validateWorkflowCall(definition, scenario.inputs);
@@ -440,6 +486,45 @@ function releaseEvidence(definition, publishImage) {
   return evidence;
 }
 
+const BUILDKIT_CACHE_STEPS = ["Resolve BuildKit cache mounts", "Restore BuildKit cache mounts", "Inject BuildKit cache mounts"];
+
+function buildkitCacheIssues(steps, mounts) {
+  const issues = [];
+  const named = (name) => steps.find((step) => step.name === name);
+  for (const name of BUILDKIT_CACHE_STEPS) {
+    const step = named(name);
+    if (!step) {
+      issues.push(`release workflow is missing the BuildKit cache-mount step: ${name}`);
+      continue;
+    }
+    if (!step.condition.includes("inputs.publish-image") || !step.condition.includes("inputs.buildkit-cache-mounts != ''")) {
+      issues.push(`BuildKit cache-mount step must be gated on publish-image and a nonempty mapping: ${name}`);
+    }
+  }
+  const restore = named("Restore BuildKit cache mounts");
+  const inject = named("Inject BuildKit cache mounts");
+  if (restore && !restore.uses.startsWith("actions/cache@")) {
+    issues.push("BuildKit cache mounts must be restored with a pinned actions/cache");
+  }
+  if (restore && !`${restore.with.key ?? ""}`.includes("hashFiles(inputs.dockerfile)")) {
+    issues.push("BuildKit cache-mount key must derive from the caller's Dockerfile hash");
+  }
+  if (restore && !/restore-keys:\s*\|\s*\n\s*\$\{\{ steps\.buildkit-cache\.outputs\.key-prefix \}\}-\s*$/m.test(restore.raw)) {
+    issues.push("BuildKit cache-mount restore must fall back to the mount-id key prefix");
+  }
+  if (inject && !inject.uses.startsWith("reproducible-containers/buildkit-cache-dance@")) {
+    issues.push("BuildKit cache mounts must be injected with a pinned buildkit-cache-dance");
+  }
+  if (inject && inject.with["cache-map"] !== "${{ steps.buildkit-cache.outputs.cache-map }}") {
+    issues.push("BuildKit cache-mount injection must consume the resolved cache map");
+  }
+  if (inject && inject.with["skip-extraction"] !== "${{ steps.buildkit-cache-restore.outputs.cache-hit }}") {
+    issues.push("BuildKit cache-mount extraction must be skipped on an exact cache hit");
+  }
+  if (mounts.length > 0 && !inject) issues.push("configured BuildKit cache mounts have no injection step");
+  return issues;
+}
+
 export function renderReleaseContract(content, scenario) {
   const definition = parseWorkflowDefinition(content);
   const call = validateWorkflowCall(definition, scenario.inputs);
@@ -493,6 +578,13 @@ export function renderReleaseContract(content, scenario) {
     issues.push("repository/artifact name drift detected");
   }
 
+  const buildkit = validateBuildkitCacheMounts(call.inputs["buildkit-cache-mounts"]);
+  issues.push(...buildkit.issues);
+  issues.push(...buildkitCacheIssues(steps, buildkit.mounts));
+  if (buildkit.mounts.length > 0 && call.inputs["publish-image"] !== true) {
+    issues.push("buildkit-cache-mounts requires publish-image");
+  }
+
   const evidence = releaseEvidence(definition, call.inputs["publish-image"] === true);
   const requiredEvidence = ["checksums", "legal-notices", "sbom", "artifact-provenance"];
   if (call.inputs["publish-image"] === true) requiredEvidence.push("image-sbom-provenance", "image-registry-attestation");
@@ -500,7 +592,22 @@ export function renderReleaseContract(content, scenario) {
     if (!evidence.has(item)) issues.push(`missing release evidence: ${item}`);
   }
 
-  return { issues, inputs: call.inputs, artifactName, imageName, evidence: [...evidence].sort() };
+  const renderedSteps = steps
+    .filter((step) => conditionApplies(step.condition, call.inputs, scenario.actor ?? "synthetic-developer"))
+    .map((step) => step.name);
+
+  return {
+    issues,
+    inputs: call.inputs,
+    artifactName,
+    imageName,
+    evidence: [...evidence].sort(),
+    steps: renderedSteps,
+    buildkitCacheMounts: buildkit.mounts,
+    buildkitCacheMap: buildkit.cacheMap,
+    buildkitCachePaths: buildkit.paths,
+    buildkitCacheKeyPrefix: buildkit.keyPrefix,
+  };
 }
 
 export function validateDependabotLabels(content, expectedLabels) {

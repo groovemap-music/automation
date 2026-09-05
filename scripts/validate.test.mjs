@@ -29,6 +29,7 @@ import {
   renderCiContract,
   renderReleaseContract,
   validateBrowserCoverageMapping,
+  validateBuildkitCacheMounts,
   validateCoverageFiles,
   validateDependabotLabels,
   validateWorkflowCall,
@@ -116,6 +117,33 @@ function runReleaseIdentityRuntime({ artifactVariant = "" } = {}) {
     return {
       ...result,
       output: result.status === 0 ? readFileSync(output, "utf8") : "",
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runBuildkitCacheRuntime(mapping) {
+  const match = REUSABLE_RELEASE.match(/          python3 - <<'PY'\n([\s\S]*?)\n          PY/);
+  assert.ok(match, "BuildKit cache-mount resolver must be present");
+  const script = match[1].split("\n").map((line) => line.slice(10)).join("\n");
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-buildkit-cache-"));
+  const output = resolve(directory, "github-output");
+  try {
+    const result = spawnSync("python3", ["-c", script], {
+      encoding: "utf8",
+      cwd: directory,
+      env: {
+        ...process.env,
+        BUILDKIT_CACHE_MOUNTS: mapping,
+        GITHUB_OUTPUT: output,
+      },
+    });
+    return {
+      ...result,
+      directory,
+      output: existsSync(output) ? readFileSync(output, "utf8") : "",
+      created: (name) => existsSync(resolve(directory, ".buildkit-cache", name)),
     };
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -959,13 +987,179 @@ test("rejects missing legal, SBOM, and provenance release evidence", () => {
   }
 });
 
+const BUILDKIT_CACHE_STEP_NAMES = [
+  "Resolve BuildKit cache mounts",
+  "Restore BuildKit cache mounts",
+  "Inject BuildKit cache mounts",
+];
+const BUILDKIT_CACHE_MAPPING = JSON.stringify({
+  "sccache-cache": "/root/.cache/sccache",
+  "cargo-registry": "/usr/local/cargo/registry",
+});
+
+test("an unconfigured buildkit-cache-mounts leaves the release image build unchanged", () => {
+  const scenario = fixture("container-release.json");
+  const rendered = renderReleaseContract(REUSABLE_RELEASE, scenario);
+  assert.deepEqual(rendered.issues, []);
+  assert.equal(rendered.inputs["buildkit-cache-mounts"], "");
+  assert.deepEqual(rendered.buildkitCacheMounts, []);
+  assert.deepEqual(rendered.buildkitCachePaths, []);
+  assert.equal(rendered.buildkitCacheKeyPrefix, "");
+  for (const name of BUILDKIT_CACHE_STEP_NAMES) assert.ok(!rendered.steps.includes(name), name);
+  assert.ok(rendered.steps.includes("Set up Docker Buildx"));
+  assert.ok(rendered.steps.includes("Build and publish versioned image"));
+  assert.ok(rendered.steps.includes("Attest published image"));
+});
+
+test("configured buildkit-cache-mounts inject and extract every named cache mount", () => {
+  const scenario = fixture("container-release.json");
+  const rendered = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    inputs: { ...scenario.inputs, "buildkit-cache-mounts": BUILDKIT_CACHE_MAPPING },
+  });
+  assert.deepEqual(rendered.issues, []);
+  assert.deepEqual(rendered.buildkitCachePaths, [".buildkit-cache/cargo-registry", ".buildkit-cache/sccache-cache"]);
+  assert.deepEqual(rendered.buildkitCacheMap, {
+    ".buildkit-cache/cargo-registry": "/usr/local/cargo/registry",
+    ".buildkit-cache/sccache-cache": "/root/.cache/sccache",
+  });
+  assert.equal(rendered.buildkitCacheKeyPrefix, "buildkit-mounts-cargo-registry-sccache-cache");
+  for (const name of BUILDKIT_CACHE_STEP_NAMES) assert.ok(rendered.steps.includes(name), name);
+  const buildIndex = rendered.steps.indexOf("Build and publish versioned image");
+  for (const name of BUILDKIT_CACHE_STEP_NAMES) assert.ok(rendered.steps.indexOf(name) < buildIndex, name);
+  assert.ok(rendered.steps.indexOf("Set up Docker Buildx") < rendered.steps.indexOf(BUILDKIT_CACHE_STEP_NAMES[0]));
+
+  const definition = parseWorkflowDefinition(REUSABLE_RELEASE);
+  const steps = definition.jobs.flatMap((job) => job.steps);
+  const restore = steps.find((step) => step.name === "Restore BuildKit cache mounts");
+  const inject = steps.find((step) => step.name === "Inject BuildKit cache mounts");
+  assert.match(restore.uses, /^actions\/cache@[a-f0-9]{40}$/);
+  assert.match(inject.uses, /^reproducible-containers\/buildkit-cache-dance@[a-f0-9]{40}$/);
+  assert.equal(restore.with.path, "${{ steps.buildkit-cache.outputs.paths }}");
+  assert.ok(restore.with.key.includes("hashFiles(inputs.dockerfile)"));
+  assert.ok(restore.with.key.includes("steps.buildkit-cache.outputs.key-prefix"));
+  assert.match(restore.raw, /restore-keys: \|\n\s+\$\{\{ steps\.buildkit-cache\.outputs\.key-prefix \}\}-/);
+  assert.equal(inject.with.builder, "${{ steps.buildx.outputs.name }}");
+  assert.equal(inject.with["cache-map"], "${{ steps.buildkit-cache.outputs.cache-map }}");
+  assert.equal(inject.with["skip-extraction"], "${{ steps.buildkit-cache-restore.outputs.cache-hit }}");
+});
+
+test("buildkit-cache-mounts requires image publication and a well-formed mapping", () => {
+  const scenario = fixture("container-release.json");
+  const invalid = [
+    ["not-json", "buildkit-cache-mounts must be valid JSON"],
+    ["[]", "buildkit-cache-mounts must be a nonempty JSON object"],
+    ["{}", "buildkit-cache-mounts must be a nonempty JSON object"],
+    ['{"Sccache": "/root/.cache/sccache"}', "buildkit-cache-mounts id must be a lowercase slug: Sccache"],
+    ['{"sccache": "root/.cache/sccache"}', "buildkit-cache-mounts target must be an absolute container path: sccache"],
+    ['{"sccache": "/root/../etc"}', "buildkit-cache-mounts target must be an absolute container path: sccache"],
+    ['{"sccache": 7}', "buildkit-cache-mounts target must be an absolute container path: sccache"],
+  ];
+  for (const [mapping, expected] of invalid) {
+    const rendered = renderReleaseContract(REUSABLE_RELEASE, {
+      ...scenario,
+      inputs: { ...scenario.inputs, "buildkit-cache-mounts": mapping },
+    });
+    assert.ok(rendered.issues.includes(expected), mapping);
+    assert.deepEqual(validateBuildkitCacheMounts(mapping).issues.slice(0, 1), [expected]);
+  }
+
+  const withoutImage = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    expectedImageName: "fixture-container",
+    inputs: { ...scenario.inputs, "publish-image": false, "image-variant": "", "buildkit-cache-mounts": BUILDKIT_CACHE_MAPPING },
+  });
+  assert.ok(withoutImage.issues.includes("buildkit-cache-mounts requires publish-image"));
+  assert.deepEqual(validateBuildkitCacheMounts("").issues, []);
+});
+
+test("rejects a release that drops or ungates its BuildKit cache-mount wiring", () => {
+  const scenario = fixture("container-release.json");
+  const configured = { ...scenario, inputs: { ...scenario.inputs, "buildkit-cache-mounts": BUILDKIT_CACHE_MAPPING } };
+  const cases = [
+    [
+      REUSABLE_RELEASE.replace("      - name: Inject BuildKit cache mounts", "      - name: Omit BuildKit injection"),
+      "missing the BuildKit cache-mount step: Inject BuildKit cache mounts",
+    ],
+    [
+      REUSABLE_RELEASE.replaceAll(
+        "if: inputs.publish-image && inputs.buildkit-cache-mounts != ''",
+        "if: inputs.publish-image",
+      ),
+      "must be gated on publish-image and a nonempty mapping",
+    ],
+    [
+      REUSABLE_RELEASE.replace("uses: actions/cache@", "uses: groovemap-music/cache@"),
+      "must be restored with a pinned actions/cache",
+    ],
+    [
+      REUSABLE_RELEASE.replace("uses: reproducible-containers/buildkit-cache-dance@", "uses: groovemap-music/cache-dance@"),
+      "must be injected with a pinned buildkit-cache-dance",
+    ],
+    [
+      REUSABLE_RELEASE.replace("hashFiles(inputs.dockerfile)", "github.sha"),
+      "key must derive from the caller's Dockerfile hash",
+    ],
+    [
+      REUSABLE_RELEASE.replace(
+        "          restore-keys: |\n            ${{ steps.buildkit-cache.outputs.key-prefix }}-\n",
+        "",
+      ),
+      "restore must fall back to the mount-id key prefix",
+    ],
+    [
+      REUSABLE_RELEASE.replace(
+        "skip-extraction: ${{ steps.buildkit-cache-restore.outputs.cache-hit }}",
+        "skip-extraction: true",
+      ),
+      "extraction must be skipped on an exact cache hit",
+    ],
+  ];
+  for (const [source, expected] of cases) {
+    assert.notEqual(source, REUSABLE_RELEASE, expected);
+    assert.ok(renderReleaseContract(source, configured).issues.some((issue) => issue.includes(expected)), expected);
+  }
+
+  const ungated = REUSABLE_RELEASE.replaceAll(
+    "if: inputs.publish-image && inputs.buildkit-cache-mounts != ''",
+    "if: inputs.publish-image",
+  );
+  assert.ok(
+    workflowContractIssues(".github/workflows/reusable-release.yml", ungated).some((issue) => issue.includes("must be gated")),
+  );
+  const dropped = REUSABLE_RELEASE.replaceAll("buildkit-cache-mounts", "removed-cache-mounts");
+  assert.ok(
+    workflowContractIssues(".github/workflows/reusable-release.yml", dropped).some((issue) => issue.includes("buildkit-cache-mounts:")),
+  );
+});
+
+test("the inline BuildKit cache resolver emits caller-safe paths and fails closed", () => {
+  const valid = runBuildkitCacheRuntime(BUILDKIT_CACHE_MAPPING);
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.match(valid.output, /^paths<<GROOVEMAP_BUILDKIT_PATHS$/m);
+  assert.match(valid.output, /^\.buildkit-cache\/cargo-registry$/m);
+  assert.match(valid.output, /^\.buildkit-cache\/sccache-cache$/m);
+  assert.match(valid.output, /^key-prefix=buildkit-mounts-cargo-registry-sccache-cache$/m);
+  const map = JSON.parse(
+    valid.output.match(/cache-map<<GROOVEMAP_BUILDKIT_MAP\n([\s\S]*?)\nGROOVEMAP_BUILDKIT_MAP/)[1],
+  );
+  assert.deepEqual(map, {
+    ".buildkit-cache/cargo-registry": "/usr/local/cargo/registry",
+    ".buildkit-cache/sccache-cache": "/root/.cache/sccache",
+  });
+
+  for (const mapping of ["not-json", "[]", "{}", '{"Sccache": "/root/.cache/sccache"}', '{"sccache": "relative"}']) {
+    const runtime = runBuildkitCacheRuntime(mapping);
+    assert.notEqual(runtime.status, 0, mapping);
+    assert.match(runtime.stdout, /::error::buildkit-cache-mounts/);
+  }
+});
+
 const CACHE_STEPS = [
   "Install the Rust compiler cache",
   "Wrap cargo with the Rust compiler cache",
   "Report Rust compiler cache statistics",
 ];
-
-const ciSteps = (scenario) => renderCiContract(REUSABLE_CI, scenario).jobs.flatMap((job) => job.steps);
 
 test("rust callers wrap cargo with the pinned compiler cache before locked installation", () => {
   const scenario = fixture("rust-ci.json");

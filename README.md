@@ -33,9 +33,10 @@ pull request recompiles only the crates it changed. `reusable-ci.yml` installs t
 before the caller's `setup-command`, and always reports `sccache --show-stats` at the end of
 validation. Caller Justfiles are unchanged.
 
-- `rust-compiler-cache` (boolean, default `true`) enables the cache for `rust` and `mixed` callers.
-  A Rust caller sets it to `false` to opt out; a `mixed` caller that builds no Rust should set it to
-  `false` so the cache steps never run. `python` and `node` callers never run them.
+- `rust-compiler-cache` (string, default `auto`) selects the mode. `auto` enables the cache for
+  `rust` callers only, `on` also enables it for a `mixed` caller that builds Rust, and `off` disables
+  it everywhere. `python` and `node` callers never run the cache steps at any mode, and any other
+  value fails the interface validation step before the gate runs.
 - `sccache-gha-version` (string, default empty) sets `SCCACHE_GHA_VERSION`, the cache-namespace key.
   Bumping it discards that caller's existing cache entries and touches no other repository.
 

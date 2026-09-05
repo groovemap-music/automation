@@ -971,7 +971,7 @@ test("rust callers wrap cargo with the pinned compiler cache before locked insta
   const scenario = fixture("rust-ci.json");
   const rendered = renderCiContract(REUSABLE_CI, scenario);
   assert.deepEqual(rendered.issues, []);
-  assert.equal(rendered.inputs["rust-compiler-cache"], true);
+  assert.equal(rendered.inputs["rust-compiler-cache"], "auto");
   assert.equal(rendered.inputs["sccache-gha-version"], "");
 
   const steps = rendered.jobs.flatMap((job) => job.steps);
@@ -984,19 +984,50 @@ test("rust callers wrap cargo with the pinned compiler cache before locked insta
   assert.deepEqual(dependencyUpdate.jobs, rendered.jobs);
 });
 
-test("the compiler cache is opt-out for rust and opt-in for every other ecosystem", () => {
-  const rust = fixture("rust-ci.json");
-  for (const step of CACHE_STEPS) {
-    assert.ok(!ciSteps({ ...rust, inputs: { ...rust.inputs, "rust-compiler-cache": false } }).includes(step), step);
+test("auto covers rust only, on adds mixed, and off disables every ecosystem", () => {
+  const expectations = {
+    "rust-ci.json": { auto: true, on: true, off: false },
+    "python-ci.json": { auto: false, on: false, off: false },
+    "node-ci.json": { auto: false, on: false, off: false },
+    "browser-ci.json": { auto: false, on: true, off: false },
+    "container-ci.json": { auto: false, on: true, off: false },
+  };
+
+  for (const [name, byMode] of Object.entries(expectations)) {
+    const scenario = fixture(name);
+    assert.ok(!Object.hasOwn(scenario.inputs, "rust-compiler-cache"), `${name} declares no cache mode`);
+    for (const [mode, enabled] of Object.entries(byMode)) {
+      const inputs = mode === "auto" ? scenario.inputs : { ...scenario.inputs, "rust-compiler-cache": mode };
+      const rendered = renderCiContract(REUSABLE_CI, { ...scenario, inputs });
+      assert.deepEqual(rendered.issues, [], `${name} ${mode}`);
+      const steps = rendered.jobs.flatMap((job) => job.steps);
+      for (const step of CACHE_STEPS) assert.equal(steps.includes(step), enabled, `${name} ${mode} ${step}`);
+    }
+  }
+});
+
+test("rejects a compiler cache mode outside auto, on, and off", () => {
+  const scenario = fixture("rust-ci.json");
+  for (const mode of ["", "true", "yes", "Auto", "enabled"]) {
+    const rendered = renderCiContract(REUSABLE_CI, {
+      ...scenario,
+      inputs: { ...scenario.inputs, "rust-compiler-cache": mode },
+    });
+    assert.ok(rendered.issues.includes("rust-compiler-cache must be auto, on, or off"), mode);
   }
 
-  for (const name of ["python-ci.json", "node-ci.json", "browser-ci.json", "container-ci.json"]) {
-    const scenario = fixture(name);
-    const declared = ciSteps(scenario);
-    for (const step of CACHE_STEPS) assert.ok(!declared.includes(step), `${name} ${step}`);
-    const opted = ciSteps({ ...scenario, inputs: { ...scenario.inputs, "rust-compiler-cache": true } });
-    const expected = scenario.inputs.language === "mixed";
-    for (const step of CACHE_STEPS) assert.equal(opted.includes(step), expected, `${name} ${step}`);
+  const interfaceStep = parseWorkflowDefinition(REUSABLE_CI)
+    .jobs.flatMap((job) => job.steps)
+    .find((candidate) => candidate.name === "Validate interface and fail closed");
+  assert.ok(interfaceStep.raw.includes("RUST_COMPILER_CACHE: ${{ inputs.rust-compiler-cache }}"));
+  assert.ok(interfaceStep.raw.includes("auto|on|off) ;;"));
+  assert.ok(interfaceStep.raw.includes("rust-compiler-cache must be auto, on, or off"));
+
+  for (const mode of ["auto", "on", "off"]) {
+    assert.deepEqual(renderCiContract(REUSABLE_CI, {
+      ...scenario,
+      inputs: { ...scenario.inputs, "rust-compiler-cache": mode },
+    }).issues, [], mode);
   }
 });
 
@@ -1023,10 +1054,9 @@ test("rejects an unpinned, unversioned, or ungated Rust compiler cache", () => {
   assert.match(validateActionPin("        uses: mozilla-actions/sccache-action@v0.0.11 # v0.0.11"), /immutable digest/);
   assert.equal(validateActionPin("        uses: ./.github/actions/setup-tools"), null);
 
-  const ungated = REUSABLE_CI.replace(
-    "      - name: Install the Rust compiler cache\n        if: inputs.rust-compiler-cache && (inputs.language == 'rust' || inputs.language == 'mixed')\n",
-    "      - name: Install the Rust compiler cache\n",
-  );
+  const gate = "        if: (inputs.language == 'rust' && inputs.rust-compiler-cache != 'off')"
+    + " || (inputs.language == 'mixed' && inputs.rust-compiler-cache == 'on')\n";
+  const ungated = REUSABLE_CI.replace(`      - name: Install the Rust compiler cache\n${gate}`, "      - name: Install the Rust compiler cache\n");
   assert.notEqual(ungated, REUSABLE_CI);
   const issues = workflowContractIssues(".github/workflows/reusable-ci.yml", ungated);
   assert.ok(issues.some((issue) => issue.includes("Install the Rust compiler cache") && issue.includes("must run with")));

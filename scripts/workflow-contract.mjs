@@ -345,6 +345,9 @@ export function renderCiContract(content, scenario) {
   if (!new Set(["python", "rust", "node", "mixed"]).has(call.inputs.language)) {
     issues.push("language must be python, rust, node, or mixed");
   }
+  if (!new Set(["auto", "on", "off"]).has(call.inputs["rust-compiler-cache"])) {
+    issues.push("rust-compiler-cache must be auto, on, or off");
+  }
   if (call.inputs["requires-private-library"]) {
     if (!/^[0-9a-f]{40}$/.test(call.inputs["private-library-revision"] ?? "")) {
       issues.push("private-library revision must be a full lowercase commit SHA");

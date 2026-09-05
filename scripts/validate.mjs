@@ -47,8 +47,10 @@ const REQUIRED_FILES = [
   "scripts/validate.test.mjs",
   "scripts/workflow-contract.mjs",
 ];
+const RUST_COMPILER_CACHE_MODES = ["auto", "on", "off"];
 const RUST_COMPILER_CACHE_CONDITION =
-  "inputs.rust-compiler-cache && (inputs.language == 'rust' || inputs.language == 'mixed')";
+  "(inputs.language == 'rust' && inputs.rust-compiler-cache != 'off')"
+  + " || (inputs.language == 'mixed' && inputs.rust-compiler-cache == 'on')";
 const MANIFEST_ECOSYSTEMS = [
   ["package.json", "npm"],
   ["pyproject.toml", "uv"],
@@ -207,6 +209,10 @@ export function workflowContractIssues(path, content) {
       "RUSTC_WRAPPER=sccache",
       "SCCACHE_GHA_ENABLED=true",
       "sccache --show-stats",
+      `rust-compiler-cache must be ${RUST_COMPILER_CACHE_MODES.slice(0, -1).join(", ")}, or ${RUST_COMPILER_CACHE_MODES.at(-1)}`,
+      `${RUST_COMPILER_CACHE_MODES.join("|")}) ;;`,
+      "RUST_COMPILER_CACHE: ${{ inputs.rust-compiler-cache }}",
+      "default: auto",
     ]);
     const codecovUploads = [...content.matchAll(/^\s+uses:\s+codecov\/codecov-action@/gm)];
     if (codecovUploads.length !== 2) {
@@ -236,7 +242,7 @@ export function workflowContractIssues(path, content) {
       path,
       content,
       "Report Rust compiler cache statistics",
-      `always() && ${RUST_COMPILER_CACHE_CONDITION}`,
+      `always() && (${RUST_COMPILER_CACHE_CONDITION})`,
     );
     requireStepMarkers(errors, path, content, "Report Rust compiler cache statistics", ["sccache --show-stats"]);
     requireStepCondition(

@@ -25,6 +25,33 @@ references, checks Dependabot coverage, and scans the current tree for common pr
 patterns. It does not access organization secrets, call GitHub APIs, publish artifacts, or change
 external state.
 
+## Release image build caching
+
+`.github/workflows/reusable-release.yml` accepts an optional `buildkit-cache-mounts` input: a JSON
+object mapping each BuildKit cache-mount id to its absolute container path. A BuildKit cache mount
+is builder-local and a hosted runner starts with an empty builder, so the mapped directories are
+restored from the Actions cache before the image build and saved after it.
+
+```yaml
+      publish-image: true
+      dockerfile: Dockerfile
+      buildkit-cache-mounts: |
+        {
+          "sccache-cache": "/root/.cache/sccache",
+          "cargo-registry": "/usr/local/cargo/registry"
+        }
+```
+
+Each id becomes the workspace directory `.buildkit-cache/<id>` and each value must match the
+`--mount=type=cache,target=` path in the caller's Dockerfile. The cache key combines the mount ids
+with the hash of `dockerfile`, and a mount-id restore-keys prefix supplies the nearest earlier
+entry, so a compile layer is reused until the Dockerfile changes. Extraction is skipped on an exact
+key hit because the stored cache already matches that Dockerfile. Callers should exclude
+`.buildkit-cache/` from their Docker build context.
+
+The input is empty by default. `publish-image` builds that omit it keep their existing behaviour:
+no cache step, no injection step, and the same `type=gha` layer cache as before.
+
 ## Repository boundary
 
 - `groovemap-music/automation` owns reusable workflow and composite-action implementation,

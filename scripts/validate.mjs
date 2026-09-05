@@ -252,7 +252,21 @@ export function workflowContractIssues(path, content) {
       "provenance: mode=max",
       "sbom: true",
       "subject-digest: ${{ steps.image.outputs.digest }}",
+      "buildkit-cache-mounts:",
+      "Resolve BuildKit cache mounts",
+      "Restore BuildKit cache mounts",
+      "Inject BuildKit cache mounts",
+      "reproducible-containers/buildkit-cache-dance@",
+      "hashFiles(inputs.dockerfile)",
+      "builder: ${{ steps.buildx.outputs.name }}",
+      "cache-map: ${{ steps.buildkit-cache.outputs.cache-map }}",
+      "skip-extraction: ${{ steps.buildkit-cache-restore.outputs.cache-hit }}",
     ]);
+    for (const step of ["Resolve BuildKit cache mounts", "Restore BuildKit cache mounts", "Inject BuildKit cache mounts"]) {
+      if (!stepBlock(content, step).includes("if: inputs.publish-image && inputs.buildkit-cache-mounts != ''")) {
+        errors.push(`${path}: ${step} must be gated on publish-image and a nonempty buildkit-cache-mounts`);
+      }
+    }
     if (/type=(?:raw|sha)[^\n]*(?:latest|main)|flavor:\s*[\s\S]*latest=true/i.test(content)) {
       errors.push(`${path}: floating or unversioned image tags are prohibited`);
     }

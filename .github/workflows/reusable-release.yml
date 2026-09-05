@@ -68,6 +68,13 @@ on:
         required: false
         default: Dockerfile
         type: string
+      buildkit-cache-mounts:
+        description: >-
+          Optional JSON object mapping BuildKit cache-mount id to its absolute container path;
+          each mount is restored from and saved to the Actions cache around the image build.
+        required: false
+        default: ""
+        type: string
       prepare-image-command:
         description: Optional command that stages locked build inputs in the Docker context.
         required: false
@@ -286,6 +293,7 @@ jobs:
             org.opencontainers.image.version=${{ github.ref_name }}
 
       - name: Set up Docker Buildx
+        id: buildx
         if: inputs.publish-image
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -296,6 +304,73 @@ jobs:
         run: |
           build_date="$(git show -s --format=%cI "${GITHUB_SHA}")"
           echo "date=${build_date}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve BuildKit cache mounts
+        id: buildkit-cache
+        if: inputs.publish-image && inputs.buildkit-cache-mounts != ''
+        shell: bash
+        env:
+          BUILDKIT_CACHE_MOUNTS: ${{ inputs.buildkit-cache-mounts }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          raw = os.environ["BUILDKIT_CACHE_MOUNTS"]
+          try:
+              mounts = json.loads(raw)
+          except json.JSONDecodeError:
+              print("::error::buildkit-cache-mounts must be valid JSON")
+              sys.exit(1)
+          if not isinstance(mounts, dict) or not mounts:
+              print("::error::buildkit-cache-mounts must be a nonempty JSON object")
+              sys.exit(1)
+
+          identifier = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+          cache_map = {}
+          paths = []
+          for name in sorted(mounts):
+              target = mounts[name]
+              if not identifier.match(name):
+                  print(f"::error::buildkit-cache-mounts id must be a lowercase slug: {name}")
+                  sys.exit(1)
+              if not isinstance(target, str) or not target.startswith("/") or ".." in target.split("/"):
+                  print("::error::buildkit-cache-mounts target must be an absolute container path")
+                  sys.exit(1)
+              path = f".buildkit-cache/{name}"
+              os.makedirs(path, exist_ok=True)
+              cache_map[path] = target
+              paths.append(path)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("paths<<GROOVEMAP_BUILDKIT_PATHS\n")
+              output.write("\n".join(paths))
+              output.write("\nGROOVEMAP_BUILDKIT_PATHS\n")
+              output.write("cache-map<<GROOVEMAP_BUILDKIT_MAP\n")
+              output.write(json.dumps(cache_map, indent=2, sort_keys=True))
+              output.write("\nGROOVEMAP_BUILDKIT_MAP\n")
+              output.write("key-prefix=buildkit-mounts-{}\n".format("-".join(sorted(mounts))))
+          PY
+
+      - name: Restore BuildKit cache mounts
+        id: buildkit-cache-restore
+        if: inputs.publish-image && inputs.buildkit-cache-mounts != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.buildkit-cache.outputs.paths }}
+          key: ${{ steps.buildkit-cache.outputs.key-prefix }}-${{ hashFiles(inputs.dockerfile) }}
+          restore-keys: |
+            ${{ steps.buildkit-cache.outputs.key-prefix }}-
+
+      - name: Inject BuildKit cache mounts
+        if: inputs.publish-image && inputs.buildkit-cache-mounts != ''
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          cache-map: ${{ steps.buildkit-cache.outputs.cache-map }}
+          skip-extraction: ${{ steps.buildkit-cache-restore.outputs.cache-hit }}
 
       - name: Build and publish versioned image
         id: image

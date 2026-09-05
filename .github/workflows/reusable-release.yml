@@ -311,6 +311,8 @@ jobs:
         shell: bash
         env:
           BUILDKIT_CACHE_MOUNTS: ${{ inputs.buildkit-cache-mounts }}
+          BUILDKIT_CACHE_IMAGE_NAME: ${{ steps.identity.outputs.image-name }}
+          BUILDKIT_CACHE_RUNNER: ${{ inputs.runner }}
         run: |
           python3 - <<'PY'
           import json
@@ -344,6 +346,10 @@ jobs:
               cache_map[path] = target
               paths.append(path)
 
+          image_name = os.environ["BUILDKIT_CACHE_IMAGE_NAME"]
+          runner_slug = re.sub(r"[^a-z0-9]+", "-", os.environ["BUILDKIT_CACHE_RUNNER"].lower()).strip("-")
+          key_prefix = "buildkit-mounts-{}-{}-{}".format("-".join(sorted(mounts)), image_name, runner_slug)
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("paths<<GROOVEMAP_BUILDKIT_PATHS\n")
               output.write("\n".join(paths))
@@ -351,7 +357,7 @@ jobs:
               output.write("cache-map<<GROOVEMAP_BUILDKIT_MAP\n")
               output.write(json.dumps(cache_map, indent=2, sort_keys=True))
               output.write("\nGROOVEMAP_BUILDKIT_MAP\n")
-              output.write("key-prefix=buildkit-mounts-{}\n".format("-".join(sorted(mounts))))
+              output.write(f"key-prefix={key_prefix}\n")
           PY
 
       - name: Restore BuildKit cache mounts

@@ -43,11 +43,16 @@ restored from the Actions cache before the image build and saved after it.
 ```
 
 Each id becomes the workspace directory `.buildkit-cache/<id>` and each value must match the
-`--mount=type=cache,target=` path in the caller's Dockerfile. The cache key combines the mount ids
-with the hash of `dockerfile`, and a mount-id restore-keys prefix supplies the nearest earlier
-entry, so a compile layer is reused until the Dockerfile changes. Extraction is skipped on an exact
-key hit because the stored cache already matches that Dockerfile. Callers should exclude
-`.buildkit-cache/` from their Docker build context.
+`--mount=type=cache,target=` path in the caller's Dockerfile. The cache key is
+`buildkit-mounts-<ids>-<image-name>-<runner>-<dockerfile-hash>`, where `<ids>` are the sorted mount
+ids, `<image-name>` is the resolved image name (including any `image-variant` suffix), and
+`<runner>` is `inputs.runner` lowercased with every run of non-alphanumeric characters collapsed to
+a single hyphen (for example `ubuntu-24.04` becomes `ubuntu-24-04`). The matching restore-keys
+prefix is `buildkit-mounts-<ids>-<image-name>-<runner>-`, so a compile layer is reused until the
+Dockerfile changes, but two callers that differ only in `image-variant` or `runner` never share or
+collide over the same cache entry. Extraction is skipped on an exact key hit because the stored
+cache already matches that Dockerfile. Callers should exclude `.buildkit-cache/` from their Docker
+build context.
 
 The input is empty by default. `publish-image` builds that omit it keep their existing behaviour:
 no cache step, no injection step, and the same `type=gha` layer cache as before.

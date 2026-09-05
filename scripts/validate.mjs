@@ -47,6 +47,10 @@ const REQUIRED_FILES = [
   "scripts/validate.test.mjs",
   "scripts/workflow-contract.mjs",
 ];
+const RUST_COMPILER_CACHE_MODES = ["auto", "on", "off"];
+const RUST_COMPILER_CACHE_CONDITION =
+  "(inputs.language == 'rust' && inputs.rust-compiler-cache != 'off')"
+  + " || (inputs.language == 'mixed' && inputs.rust-compiler-cache == 'on')";
 const MANIFEST_ECOSYSTEMS = [
   ["package.json", "npm"],
   ["pyproject.toml", "uv"],
@@ -94,6 +98,19 @@ export function validateActionReference(reference) {
   return `action reference must use a local path or immutable digest: ${reference}`;
 }
 
+export function validateActionPin(line) {
+  const match = line.match(/^\s*(?:-\s*)?uses:\s*([^\s#]+)(.*)$/);
+  if (!match) return null;
+  const [, reference, remainder] = match;
+  const referenceIssue = validateActionReference(reference);
+  if (referenceIssue) return referenceIssue;
+  if (reference.startsWith("./")) return null;
+  if (!/^\s+#\s*v[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z.]+)?\s*$/.test(remainder)) {
+    return `pinned action must record its released version in a trailing comment: ${reference}`;
+  }
+  return null;
+}
+
 function requireMarkers(errors, path, content, markers) {
   for (const marker of markers) {
     if (!content.includes(marker)) errors.push(`${path}: required contract marker is missing: ${marker}`);
@@ -108,7 +125,7 @@ function stepBlock(content, name) {
   return content.slice(start, next < 0 ? content.length : next);
 }
 
-function requireAlwaysStep(errors, path, content, name, condition) {
+function requireStepCondition(errors, path, content, name, condition) {
   const block = stepBlock(content, name);
   if (!block.includes(`if: ${condition}`)) errors.push(`${path}: ${name} must run with ${condition}`);
 }
@@ -186,6 +203,16 @@ export function workflowContractIssues(path, content) {
       "files: ${{ steps.interface.outputs.codecov-files }}",
       "steps.interface.outcome == 'success'",
       "needs.validate.outputs.browser-mapping-valid == 'true'",
+      "rust-compiler-cache:",
+      "sccache-gha-version:",
+      "mozilla-actions/sccache-action@",
+      "RUSTC_WRAPPER=sccache",
+      "SCCACHE_GHA_ENABLED=true",
+      "sccache --show-stats",
+      `rust-compiler-cache must be ${RUST_COMPILER_CACHE_MODES.slice(0, -1).join(", ")}, or ${RUST_COMPILER_CACHE_MODES.at(-1)}`,
+      `${RUST_COMPILER_CACHE_MODES.join("|")}) ;;`,
+      "RUST_COMPILER_CACHE: ${{ inputs.rust-compiler-cache }}",
+      "default: auto",
     ]);
     const codecovUploads = [...content.matchAll(/^\s+uses:\s+codecov\/codecov-action@/gm)];
     if (codecovUploads.length !== 2) {
@@ -201,28 +228,45 @@ export function workflowContractIssues(path, content) {
       "flags: e2e-${{ matrix.upload.project }}",
       "disable_search: true",
     ]);
-    requireAlwaysStep(
+    for (const name of ["Install the Rust compiler cache", "Wrap cargo with the Rust compiler cache"]) {
+      requireStepCondition(errors, path, content, name, RUST_COMPILER_CACHE_CONDITION);
+    }
+    requireStepMarkers(errors, path, content, "Wrap cargo with the Rust compiler cache", [
+      "RUSTC_WRAPPER=sccache",
+      "SCCACHE_GHA_ENABLED=true",
+      "SCCACHE_GHA_VERSION: ${{ inputs.sccache-gha-version }}",
+      "SCCACHE_GHA_VERSION=${SCCACHE_GHA_VERSION}",
+    ]);
+    requireStepCondition(
+      errors,
+      path,
+      content,
+      "Report Rust compiler cache statistics",
+      `always() && (${RUST_COMPILER_CACHE_CONDITION})`,
+    );
+    requireStepMarkers(errors, path, content, "Report Rust compiler cache statistics", ["sccache --show-stats"]);
+    requireStepCondition(
       errors,
       path,
       content,
       "Run E2E post-processing and teardown",
       "always() && inputs.e2e-post-command != ''",
     );
-    requireAlwaysStep(
+    requireStepCondition(
       errors,
       path,
       content,
       "Stage workspace-relative coverage evidence",
       "always() && steps.interface.outcome == 'success'",
     );
-    requireAlwaysStep(
+    requireStepCondition(
       errors,
       path,
       content,
       "Retain coverage evidence",
       "always() && steps.stage-coverage.outcome == 'success'",
     );
-    requireAlwaysStep(
+    requireStepCondition(
       errors,
       path,
       content,
@@ -252,7 +296,21 @@ export function workflowContractIssues(path, content) {
       "provenance: mode=max",
       "sbom: true",
       "subject-digest: ${{ steps.image.outputs.digest }}",
+      "buildkit-cache-mounts:",
+      "Resolve BuildKit cache mounts",
+      "Restore BuildKit cache mounts",
+      "Inject BuildKit cache mounts",
+      "reproducible-containers/buildkit-cache-dance@",
+      "hashFiles(inputs.dockerfile)",
+      "builder: ${{ steps.buildx.outputs.name }}",
+      "cache-map: ${{ steps.buildkit-cache.outputs.cache-map }}",
+      "skip-extraction: ${{ steps.buildkit-cache-restore.outputs.cache-hit }}",
     ]);
+    for (const step of ["Resolve BuildKit cache mounts", "Restore BuildKit cache mounts", "Inject BuildKit cache mounts"]) {
+      if (!stepBlock(content, step).includes("if: inputs.publish-image && inputs.buildkit-cache-mounts != ''")) {
+        errors.push(`${path}: ${step} must be gated on publish-image and a nonempty buildkit-cache-mounts`);
+      }
+    }
     if (/type=(?:raw|sha)[^\n]*(?:latest|main)|flavor:\s*[\s\S]*latest=true/i.test(content)) {
       errors.push(`${path}: floating or unversioned image tags are prohibited`);
     }
@@ -324,8 +382,8 @@ function checkAutomationPolicy(errors, files) {
   const workflows = workflowPaths.map((path) => readFileSync(path, "utf8")).join("\n");
   for (const path of [...workflowPaths, ...actionPaths]) {
     const content = readFileSync(path, "utf8");
-    for (const match of content.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)) {
-      const issue = validateActionReference(match[1]);
+    for (const line of content.split("\n")) {
+      const issue = validateActionPin(line);
       if (issue) errors.push(`${relative(ROOT, path)}: ${issue}`);
     }
     if (workflowPaths.includes(path)) {

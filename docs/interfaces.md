@@ -35,6 +35,22 @@ integration execution, and coverage retention and optional Codecov upload do the
 evidence steps cannot turn a failed validation green: the aggregate `Required result` job remains
 fail-closed.
 
+Callers that build Rust also carry the optional compiler-cache inputs. `rust-compiler-cache` is a
+three-value mode defaulting to `auto`: `auto` installs the cache for a `rust` caller only, `on`
+additionally installs it for a `mixed` caller that builds Rust, and `off` disables it everywhere.
+`python` and `node` callers never render the cache steps at any mode, and a `mixed` caller that
+builds no Rust needs no input because `auto` already excludes it. Any other value fails the
+interface validation step before the gate is evaluated, so a typo cannot silently disable the cache.
+
+When the mode selects the cache, the workflow installs the pinned `mozilla-actions/sccache-action`
+after tool provisioning and before `setup-command`, then exports `RUSTC_WRAPPER=sccache` and
+`SCCACHE_GHA_ENABLED=true` through `GITHUB_ENV` so every later caller command compiles through the
+cache without changing that repository's own commands. `sccache-gha-version` is empty by default
+and, when set, exports `SCCACHE_GHA_VERSION` as the cache-namespace key so one caller can discard its
+own entries without affecting another repository. Cache statistics run with `always()` and report
+`sccache --show-stats` after validation, so a failed gate still records cache effectiveness and
+cannot be turned green by the report.
+
 Artifact retention consumes `coverage-files` with its newline-separated shape intact. After
 validation, the workflow deterministically joins the same ordered paths with commas for Codecov's
 `files` input. Callers therefore declare one canonical path list without relying on Codecov to
@@ -152,6 +168,16 @@ When `publish-image` is true, the image is
 version tag is emitted. The build receives the commit-derived build date, revision, and version,
 and emits BuildKit SBOM/provenance plus a registry provenance attestation. The reusable release has
 no branch, schedule, floating tag, or unversioned publication path.
+
+`buildkit-cache-mounts` is an optional JSON object mapping a BuildKit cache-mount id to its absolute
+container path. A cache mount is builder-local and a hosted runner's builder starts empty, so each
+mapped directory is restored from the Actions cache into `.buildkit-cache/<id>`, injected into the
+named mount before the build, and extracted back afterwards. The cache key combines the mount ids
+with the hash of `dockerfile` and falls back to a mount-id restore-keys prefix; extraction is skipped
+on an exact key hit because the stored cache already reflects that Dockerfile. Each value must equal
+the `--mount=type=cache,target=` path in the caller's Dockerfile, and callers should exclude
+`.buildkit-cache/` from their Docker build context. The input is empty by default, in which case the
+release performs no cache or injection step and keeps the registry layer cache it already used.
 
 The caller is intentionally small:
 

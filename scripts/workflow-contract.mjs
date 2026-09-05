@@ -135,15 +135,63 @@ function actorConditionApplies(condition, actor) {
   return true;
 }
 
-function inputConditionApplies(condition, inputs) {
-  for (const comparison of condition.matchAll(/inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*''/g)) {
-    const blank = inputs[comparison[1]] === "" || inputs[comparison[1]] === undefined;
-    if (comparison[2] === "==" ? !blank : blank) return false;
+function splitTopLevel(expression, operator) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < expression.length; index += 1) {
+    const character = expression[index];
+    if (character === "(") depth += 1;
+    else if (character === ")") depth -= 1;
+    else if (depth === 0 && expression.startsWith(operator, index)) {
+      parts.push(expression.slice(start, index));
+      index += operator.length - 1;
+      start = index + 1;
+    }
   }
-  for (const reference of condition.matchAll(/(?:^|&&|\|\|)\s*inputs\.([A-Za-z0-9_-]+)(?=\s*(?:&&|\|\||$))/g)) {
-    if (!inputs[reference[1]]) return false;
+  parts.push(expression.slice(start));
+  return parts;
+}
+
+function isWrappedInParentheses(expression) {
+  if (!expression.startsWith("(") || !expression.endsWith(")")) return false;
+  let depth = 0;
+  for (let index = 0; index < expression.length; index += 1) {
+    if (expression[index] === "(") depth += 1;
+    else if (expression[index] === ")") {
+      depth -= 1;
+      if (depth === 0) return index === expression.length - 1;
+    }
+  }
+  return false;
+}
+
+// A leaf that names no workflow input (always(), steps.*, needs.*, github.*) stays neutral so
+// input-driven rendering never depends on runtime-only context.
+function inputLeafApplies(leaf, inputs) {
+  if (!leaf.includes("inputs.")) return true;
+  const comparison = leaf.match(/^inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'$/);
+  if (comparison) {
+    const value = inputs[comparison[1]];
+    const matches = (value === undefined || value === null ? "" : String(value)) === comparison[3];
+    return comparison[2] === "==" ? matches : !matches;
+  }
+  const reference = leaf.match(/^(!?)inputs\.([A-Za-z0-9_-]+)$/);
+  if (reference) {
+    const truthy = Boolean(inputs[reference[2]]);
+    return reference[1] === "!" ? !truthy : truthy;
   }
   return true;
+}
+
+function inputConditionApplies(condition, inputs) {
+  const expression = condition.trim();
+  const disjuncts = splitTopLevel(expression, "||");
+  if (disjuncts.length > 1) return disjuncts.some((part) => inputConditionApplies(part, inputs));
+  const conjuncts = splitTopLevel(expression, "&&");
+  if (conjuncts.length > 1) return conjuncts.every((part) => inputConditionApplies(part, inputs));
+  if (isWrappedInParentheses(expression)) return inputConditionApplies(expression.slice(1, -1), inputs);
+  return inputLeafApplies(expression, inputs);
 }
 
 function conditionApplies(condition, inputs, actor) {
@@ -288,6 +336,52 @@ export function validateBrowserCoverageMapping(raw) {
   };
 }
 
+export function validateBuildkitCacheMounts(raw) {
+  if (raw === "" || raw === undefined) return { issues: [], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
+  if (typeof raw !== "string") {
+    return { issues: ["buildkit-cache-mounts must be a JSON string"], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { issues: ["buildkit-cache-mounts must be valid JSON"], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length === 0) {
+    return {
+      issues: ["buildkit-cache-mounts must be a nonempty JSON object"],
+      mounts: [],
+      cacheMap: {},
+      paths: [],
+      keyPrefix: "",
+    };
+  }
+
+  const issues = [];
+  const mounts = [];
+  const cacheMap = {};
+  const paths = [];
+  for (const identifier of Object.keys(parsed).sort()) {
+    const target = parsed[identifier];
+    if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(identifier)) {
+      issues.push(`buildkit-cache-mounts id must be a lowercase slug: ${identifier}`);
+      continue;
+    }
+    if (typeof target !== "string" || !target.startsWith("/") || target.split("/").includes("..") || target.trim() !== target) {
+      issues.push(`buildkit-cache-mounts target must be an absolute container path: ${identifier}`);
+      continue;
+    }
+    const path = `.buildkit-cache/${identifier}`;
+    mounts.push({ id: identifier, target, path });
+    cacheMap[path] = target;
+    paths.push(path);
+  }
+
+  const keyPrefix = issues.length === 0 ? `buildkit-mounts-${Object.keys(parsed).sort().join("-")}` : "";
+  return { issues, mounts, cacheMap, paths, keyPrefix };
+}
+
 export function renderCiContract(content, scenario) {
   const definition = parseWorkflowDefinition(content);
   const call = validateWorkflowCall(definition, scenario.inputs);
@@ -296,6 +390,9 @@ export function renderCiContract(content, scenario) {
 
   if (!new Set(["python", "rust", "node", "mixed"]).has(call.inputs.language)) {
     issues.push("language must be python, rust, node, or mixed");
+  }
+  if (!new Set(["auto", "on", "off"]).has(call.inputs["rust-compiler-cache"])) {
+    issues.push("rust-compiler-cache must be auto, on, or off");
   }
   if (call.inputs["requires-private-library"]) {
     if (!/^[0-9a-f]{40}$/.test(call.inputs["private-library-revision"] ?? "")) {
@@ -389,6 +486,45 @@ function releaseEvidence(definition, publishImage) {
   return evidence;
 }
 
+const BUILDKIT_CACHE_STEPS = ["Resolve BuildKit cache mounts", "Restore BuildKit cache mounts", "Inject BuildKit cache mounts"];
+
+function buildkitCacheIssues(steps, mounts) {
+  const issues = [];
+  const named = (name) => steps.find((step) => step.name === name);
+  for (const name of BUILDKIT_CACHE_STEPS) {
+    const step = named(name);
+    if (!step) {
+      issues.push(`release workflow is missing the BuildKit cache-mount step: ${name}`);
+      continue;
+    }
+    if (!step.condition.includes("inputs.publish-image") || !step.condition.includes("inputs.buildkit-cache-mounts != ''")) {
+      issues.push(`BuildKit cache-mount step must be gated on publish-image and a nonempty mapping: ${name}`);
+    }
+  }
+  const restore = named("Restore BuildKit cache mounts");
+  const inject = named("Inject BuildKit cache mounts");
+  if (restore && !restore.uses.startsWith("actions/cache@")) {
+    issues.push("BuildKit cache mounts must be restored with a pinned actions/cache");
+  }
+  if (restore && !`${restore.with.key ?? ""}`.includes("hashFiles(inputs.dockerfile)")) {
+    issues.push("BuildKit cache-mount key must derive from the caller's Dockerfile hash");
+  }
+  if (restore && !/restore-keys:\s*\|\s*\n\s*\$\{\{ steps\.buildkit-cache\.outputs\.key-prefix \}\}-\s*$/m.test(restore.raw)) {
+    issues.push("BuildKit cache-mount restore must fall back to the mount-id key prefix");
+  }
+  if (inject && !inject.uses.startsWith("reproducible-containers/buildkit-cache-dance@")) {
+    issues.push("BuildKit cache mounts must be injected with a pinned buildkit-cache-dance");
+  }
+  if (inject && inject.with["cache-map"] !== "${{ steps.buildkit-cache.outputs.cache-map }}") {
+    issues.push("BuildKit cache-mount injection must consume the resolved cache map");
+  }
+  if (inject && inject.with["skip-extraction"] !== "${{ steps.buildkit-cache-restore.outputs.cache-hit }}") {
+    issues.push("BuildKit cache-mount extraction must be skipped on an exact cache hit");
+  }
+  if (mounts.length > 0 && !inject) issues.push("configured BuildKit cache mounts have no injection step");
+  return issues;
+}
+
 export function renderReleaseContract(content, scenario) {
   const definition = parseWorkflowDefinition(content);
   const call = validateWorkflowCall(definition, scenario.inputs);
@@ -442,6 +578,13 @@ export function renderReleaseContract(content, scenario) {
     issues.push("repository/artifact name drift detected");
   }
 
+  const buildkit = validateBuildkitCacheMounts(call.inputs["buildkit-cache-mounts"]);
+  issues.push(...buildkit.issues);
+  issues.push(...buildkitCacheIssues(steps, buildkit.mounts));
+  if (buildkit.mounts.length > 0 && call.inputs["publish-image"] !== true) {
+    issues.push("buildkit-cache-mounts requires publish-image");
+  }
+
   const evidence = releaseEvidence(definition, call.inputs["publish-image"] === true);
   const requiredEvidence = ["checksums", "legal-notices", "sbom", "artifact-provenance"];
   if (call.inputs["publish-image"] === true) requiredEvidence.push("image-sbom-provenance", "image-registry-attestation");
@@ -449,7 +592,22 @@ export function renderReleaseContract(content, scenario) {
     if (!evidence.has(item)) issues.push(`missing release evidence: ${item}`);
   }
 
-  return { issues, inputs: call.inputs, artifactName, imageName, evidence: [...evidence].sort() };
+  const renderedSteps = steps
+    .filter((step) => conditionApplies(step.condition, call.inputs, scenario.actor ?? "synthetic-developer"))
+    .map((step) => step.name);
+
+  return {
+    issues,
+    inputs: call.inputs,
+    artifactName,
+    imageName,
+    evidence: [...evidence].sort(),
+    steps: renderedSteps,
+    buildkitCacheMounts: buildkit.mounts,
+    buildkitCacheMap: buildkit.cacheMap,
+    buildkitCachePaths: buildkit.paths,
+    buildkitCacheKeyPrefix: buildkit.keyPrefix,
+  };
 }
 
 export function validateDependabotLabels(content, expectedLabels) {

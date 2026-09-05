@@ -25,6 +25,48 @@ references, checks Dependabot coverage, and scans the current tree for common pr
 patterns. It does not access organization secrets, call GitHub APIs, publish artifacts, or change
 external state.
 
+## Release image build caching
+
+`.github/workflows/reusable-release.yml` accepts an optional `buildkit-cache-mounts` input: a JSON
+object mapping each BuildKit cache-mount id to its absolute container path. A BuildKit cache mount
+is builder-local and a hosted runner starts with an empty builder, so the mapped directories are
+restored from the Actions cache before the image build and saved after it.
+
+```yaml
+      publish-image: true
+      dockerfile: Dockerfile
+      buildkit-cache-mounts: |
+        {
+          "sccache-cache": "/root/.cache/sccache",
+          "cargo-registry": "/usr/local/cargo/registry"
+        }
+```
+
+Each id becomes the workspace directory `.buildkit-cache/<id>` and each value must match the
+`--mount=type=cache,target=` path in the caller's Dockerfile. The cache key combines the mount ids
+with the hash of `dockerfile`, and a mount-id restore-keys prefix supplies the nearest earlier
+entry, so a compile layer is reused until the Dockerfile changes. Extraction is skipped on an exact
+key hit because the stored cache already matches that Dockerfile. Callers should exclude
+`.buildkit-cache/` from their Docker build context.
+
+The input is empty by default. `publish-image` builds that omit it keep their existing behaviour:
+no cache step, no injection step, and the same `type=gha` layer cache as before.
+
+## Rust compiler cache
+
+Callers that build Rust get the `sccache` compiler cache backed by the GitHub Actions cache, so a
+pull request recompiles only the crates it changed. `reusable-ci.yml` installs the pinned
+`mozilla-actions/sccache-action`, exports `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true`
+before the caller's `setup-command`, and always reports `sccache --show-stats` at the end of
+validation. Caller Justfiles are unchanged.
+
+- `rust-compiler-cache` (string, default `auto`) selects the mode. `auto` enables the cache for
+  `rust` callers only, `on` also enables it for a `mixed` caller that builds Rust, and `off` disables
+  it everywhere. `python` and `node` callers never run the cache steps at any mode, and any other
+  value fails the interface validation step before the gate runs.
+- `sccache-gha-version` (string, default empty) sets `SCCACHE_GHA_VERSION`, the cache-namespace key.
+  Bumping it discards that caller's existing cache entries and touches no other repository.
+
 ## Repository boundary
 
 - `groovemap-music/automation` owns reusable workflow and composite-action implementation,

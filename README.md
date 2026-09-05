@@ -52,6 +52,21 @@ key hit because the stored cache already matches that Dockerfile. Callers should
 The input is empty by default. `publish-image` builds that omit it keep their existing behaviour:
 no cache step, no injection step, and the same `type=gha` layer cache as before.
 
+## Rust compiler cache
+
+Callers that build Rust get the `sccache` compiler cache backed by the GitHub Actions cache, so a
+pull request recompiles only the crates it changed. `reusable-ci.yml` installs the pinned
+`mozilla-actions/sccache-action`, exports `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true`
+before the caller's `setup-command`, and always reports `sccache --show-stats` at the end of
+validation. Caller Justfiles are unchanged.
+
+- `rust-compiler-cache` (string, default `auto`) selects the mode. `auto` enables the cache for
+  `rust` callers only, `on` also enables it for a `mixed` caller that builds Rust, and `off` disables
+  it everywhere. `python` and `node` callers never run the cache steps at any mode, and any other
+  value fails the interface validation step before the gate runs.
+- `sccache-gha-version` (string, default empty) sets `SCCACHE_GHA_VERSION`, the cache-namespace key.
+  Bumping it discards that caller's existing cache entries and touches no other repository.
+
 ## Repository boundary
 
 - `groovemap-music/automation` owns reusable workflow and composite-action implementation,

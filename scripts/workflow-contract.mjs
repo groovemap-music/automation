@@ -336,7 +336,19 @@ export function validateBrowserCoverageMapping(raw) {
   };
 }
 
-export function validateBuildkitCacheMounts(raw) {
+function sanitizeBuildkitCacheKeySegment(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function buildkitCacheKeyPrefix(mountIds, imageName, runner) {
+  const runnerSlug = sanitizeBuildkitCacheKeySegment(runner);
+  return `buildkit-mounts-${mountIds.join("-")}-${imageName}-${runnerSlug}`;
+}
+
+export function validateBuildkitCacheMounts(raw, context = {}) {
   if (raw === "" || raw === undefined) return { issues: [], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
   if (typeof raw !== "string") {
     return { issues: ["buildkit-cache-mounts must be a JSON string"], mounts: [], cacheMap: {}, paths: [], keyPrefix: "" };
@@ -378,7 +390,10 @@ export function validateBuildkitCacheMounts(raw) {
     paths.push(path);
   }
 
-  const keyPrefix = issues.length === 0 ? `buildkit-mounts-${Object.keys(parsed).sort().join("-")}` : "";
+  const keyPrefix =
+    issues.length === 0
+      ? buildkitCacheKeyPrefix(Object.keys(parsed).sort(), context.imageName, context.runner)
+      : "";
   return { issues, mounts, cacheMap, paths, keyPrefix };
 }
 
@@ -578,7 +593,10 @@ export function renderReleaseContract(content, scenario) {
     issues.push("repository/artifact name drift detected");
   }
 
-  const buildkit = validateBuildkitCacheMounts(call.inputs["buildkit-cache-mounts"]);
+  const buildkit = validateBuildkitCacheMounts(call.inputs["buildkit-cache-mounts"], {
+    imageName,
+    runner: call.inputs["runner"],
+  });
   issues.push(...buildkit.issues);
   issues.push(...buildkitCacheIssues(steps, buildkit.mounts));
   if (buildkit.mounts.length > 0 && call.inputs["publish-image"] !== true) {

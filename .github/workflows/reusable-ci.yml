@@ -12,6 +12,20 @@ on:
         description: Primary caller ecosystem (python, rust, node, or mixed).
         required: true
         type: string
+      rust-compiler-cache:
+        description: >-
+          Wrap cargo with the sccache compiler cache backed by the GitHub Actions cache. Applies to
+          rust and mixed callers only; python and node callers never run the cache steps.
+        required: false
+        default: true
+        type: boolean
+      sccache-gha-version:
+        description: >-
+          Optional SCCACHE_GHA_VERSION cache-namespace value. Bumping it discards the caller's
+          existing sccache entries without touching any other repository.
+        required: false
+        default: ""
+        type: string
       setup-command:
         description: Locked dependency installation command.
         required: true
@@ -348,6 +362,24 @@ jobs:
         shell: bash
         run: just --list
 
+      - name: Install the Rust compiler cache
+        if: inputs.rust-compiler-cache && (inputs.language == 'rust' || inputs.language == 'mixed')
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Wrap cargo with the Rust compiler cache
+        if: inputs.rust-compiler-cache && (inputs.language == 'rust' || inputs.language == 'mixed')
+        shell: bash
+        env:
+          SCCACHE_GHA_VERSION: ${{ inputs.sccache-gha-version }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_GHA_ENABLED=true"
+          } >> "${GITHUB_ENV}"
+          if [[ -n "${SCCACHE_GHA_VERSION}" ]]; then
+            echo "SCCACHE_GHA_VERSION=${SCCACHE_GHA_VERSION}" >> "${GITHUB_ENV}"
+          fi
+
       - name: Install locked dependencies
         shell: bash
         run: ${{ inputs.setup-command }}
@@ -525,6 +557,16 @@ jobs:
         env:
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: git config --global --remove-section "url.https://x-access-token:${APP_TOKEN}@github.com/" || true
+
+      - name: Report Rust compiler cache statistics
+        if: always() && inputs.rust-compiler-cache && (inputs.language == 'rust' || inputs.language == 'mixed')
+        shell: bash
+        run: |
+          if ! command -v sccache >/dev/null 2>&1; then
+            echo "::notice::sccache was not installed for this run; no compiler cache statistics"
+            exit 0
+          fi
+          sccache --show-stats
 
   browser-codecov:
     name: Browser coverage (${{ matrix.upload.project }})

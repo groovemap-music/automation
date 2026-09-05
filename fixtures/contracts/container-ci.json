@@ -4,6 +4,7 @@
   "actor": "synthetic-developer",
   "inputs": {
     "language": "mixed",
+    "rust-compiler-cache": false,
     "setup-command": "just setup",
     "check-command": "just check",
     "coverage-command": "just test",

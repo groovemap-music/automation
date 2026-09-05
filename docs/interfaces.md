@@ -35,6 +35,18 @@ integration execution, and coverage retention and optional Codecov upload do the
 evidence steps cannot turn a failed validation green: the aggregate `Required result` job remains
 fail-closed.
 
+Rust and mixed callers also carry the optional compiler-cache inputs. `rust-compiler-cache`
+defaults to `true` and installs the pinned `mozilla-actions/sccache-action` after tool provisioning
+and before `setup-command`, then exports `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true`
+through `GITHUB_ENV` so every later caller command compiles through the cache without changing that
+repository's own commands. `sccache-gha-version` is empty by default and, when set, exports
+`SCCACHE_GHA_VERSION` as the cache-namespace key so one caller can discard its own entries without
+affecting another repository. A Rust caller opts out with `rust-compiler-cache: false`, and a mixed
+caller that builds no Rust should do the same; `python` and `node` callers never render the cache
+steps at any input value. Cache statistics run with `always()` and report
+`sccache --show-stats` after validation, so a failed gate still records cache effectiveness and
+cannot be turned green by the report.
+
 Artifact retention consumes `coverage-files` with its newline-separated shape intact. After
 validation, the workflow deterministically joins the same ordered paths with commas for Codecov's
 `files` input. Callers therefore declare one canonical path list without relying on Codecov to

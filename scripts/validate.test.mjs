@@ -20,6 +20,7 @@ import {
   extractLinks,
   findExposureIssues,
   validate,
+  validateActionPin,
   validateActionReference,
   workflowContractIssues,
 } from "./validate.mjs";
@@ -956,6 +957,95 @@ test("rejects missing legal, SBOM, and provenance release evidence", () => {
   for (const [source, evidence] of cases) {
     assert.ok(renderReleaseContract(source, scenario).issues.includes(`missing release evidence: ${evidence}`), evidence);
   }
+});
+
+const CACHE_STEPS = [
+  "Install the Rust compiler cache",
+  "Wrap cargo with the Rust compiler cache",
+  "Report Rust compiler cache statistics",
+];
+
+const ciSteps = (scenario) => renderCiContract(REUSABLE_CI, scenario).jobs.flatMap((job) => job.steps);
+
+test("rust callers wrap cargo with the pinned compiler cache before locked installation", () => {
+  const scenario = fixture("rust-ci.json");
+  const rendered = renderCiContract(REUSABLE_CI, scenario);
+  assert.deepEqual(rendered.issues, []);
+  assert.equal(rendered.inputs["rust-compiler-cache"], true);
+  assert.equal(rendered.inputs["sccache-gha-version"], "");
+
+  const steps = rendered.jobs.flatMap((job) => job.steps);
+  for (const step of CACHE_STEPS) assert.ok(steps.includes(step), step);
+  assert.ok(steps.indexOf("Install the Rust compiler cache") > steps.indexOf("Set up pinned repository tools"));
+  assert.ok(steps.indexOf("Wrap cargo with the Rust compiler cache") < steps.indexOf("Install locked dependencies"));
+  assert.equal(rendered.jobs.find((job) => job.id === "validate").steps.at(-1), "Report Rust compiler cache statistics");
+
+  const dependencyUpdate = renderCiContract(REUSABLE_CI, { ...scenario, actor: "dependabot[bot]" });
+  assert.deepEqual(dependencyUpdate.jobs, rendered.jobs);
+});
+
+test("the compiler cache is opt-out for rust and opt-in for every other ecosystem", () => {
+  const rust = fixture("rust-ci.json");
+  for (const step of CACHE_STEPS) {
+    assert.ok(!ciSteps({ ...rust, inputs: { ...rust.inputs, "rust-compiler-cache": false } }).includes(step), step);
+  }
+
+  for (const name of ["python-ci.json", "node-ci.json", "browser-ci.json", "container-ci.json"]) {
+    const scenario = fixture(name);
+    const declared = ciSteps(scenario);
+    for (const step of CACHE_STEPS) assert.ok(!declared.includes(step), `${name} ${step}`);
+    const opted = ciSteps({ ...scenario, inputs: { ...scenario.inputs, "rust-compiler-cache": true } });
+    const expected = scenario.inputs.language === "mixed";
+    for (const step of CACHE_STEPS) assert.equal(opted.includes(step), expected, `${name} ${step}`);
+  }
+});
+
+test("the compiler cache exports its wrapper, backend, and optional cache namespace", () => {
+  const step = parseWorkflowDefinition(REUSABLE_CI)
+    .jobs.flatMap((job) => job.steps)
+    .find((candidate) => candidate.name === "Wrap cargo with the Rust compiler cache");
+  assert.ok(step, "the compiler cache export step must be present");
+  assert.ok(step.raw.includes('echo "RUSTC_WRAPPER=sccache"'));
+  assert.ok(step.raw.includes('echo "SCCACHE_GHA_ENABLED=true"'));
+  assert.ok(step.raw.includes("SCCACHE_GHA_VERSION: ${{ inputs.sccache-gha-version }}"));
+  assert.ok(step.raw.includes('if [[ -n "${SCCACHE_GHA_VERSION}" ]]; then'));
+
+  const install = parseWorkflowDefinition(REUSABLE_CI)
+    .jobs.flatMap((job) => job.steps)
+    .find((candidate) => candidate.name === "Install the Rust compiler cache");
+  assert.match(install.uses, /^mozilla-actions\/sccache-action@[a-f0-9]{40}$/);
+  assert.equal(validateActionPin(`        uses: ${install.uses} # v0.0.11`), null);
+});
+
+test("rejects an unpinned, unversioned, or ungated Rust compiler cache", () => {
+  const unversioned = "        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba";
+  assert.match(validateActionPin(unversioned), /released version in a trailing comment/);
+  assert.match(validateActionPin("        uses: mozilla-actions/sccache-action@v0.0.11 # v0.0.11"), /immutable digest/);
+  assert.equal(validateActionPin("        uses: ./.github/actions/setup-tools"), null);
+
+  const ungated = REUSABLE_CI.replace(
+    "      - name: Install the Rust compiler cache\n        if: inputs.rust-compiler-cache && (inputs.language == 'rust' || inputs.language == 'mixed')\n",
+    "      - name: Install the Rust compiler cache\n",
+  );
+  assert.notEqual(ungated, REUSABLE_CI);
+  const issues = workflowContractIssues(".github/workflows/reusable-ci.yml", ungated);
+  assert.ok(issues.some((issue) => issue.includes("Install the Rust compiler cache") && issue.includes("must run with")));
+
+  const unreported = REUSABLE_CI.replace("          sccache --show-stats\n", "          true\n");
+  assert.notEqual(unreported, REUSABLE_CI);
+  assert.ok(
+    workflowContractIssues(".github/workflows/reusable-ci.yml", unreported)
+      .some((issue) => issue.includes("sccache --show-stats")),
+  );
+});
+
+test("cache statistics survive a failed validation step", () => {
+  const definition = parseWorkflowDefinition(REUSABLE_CI);
+  const step = definition.jobs
+    .flatMap((job) => job.steps)
+    .find((candidate) => candidate.name === "Report Rust compiler cache statistics");
+  assert.ok(step.condition.startsWith("always() &&"));
+  assert.ok(step.raw.includes("command -v sccache"));
 });
 
 test("current repository satisfies the complete shared automation contract", () => {

@@ -135,15 +135,63 @@ function actorConditionApplies(condition, actor) {
   return true;
 }
 
-function inputConditionApplies(condition, inputs) {
-  for (const comparison of condition.matchAll(/inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*''/g)) {
-    const blank = inputs[comparison[1]] === "" || inputs[comparison[1]] === undefined;
-    if (comparison[2] === "==" ? !blank : blank) return false;
+function splitTopLevel(expression, operator) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < expression.length; index += 1) {
+    const character = expression[index];
+    if (character === "(") depth += 1;
+    else if (character === ")") depth -= 1;
+    else if (depth === 0 && expression.startsWith(operator, index)) {
+      parts.push(expression.slice(start, index));
+      index += operator.length - 1;
+      start = index + 1;
+    }
   }
-  for (const reference of condition.matchAll(/(?:^|&&|\|\|)\s*inputs\.([A-Za-z0-9_-]+)(?=\s*(?:&&|\|\||$))/g)) {
-    if (!inputs[reference[1]]) return false;
+  parts.push(expression.slice(start));
+  return parts;
+}
+
+function isWrappedInParentheses(expression) {
+  if (!expression.startsWith("(") || !expression.endsWith(")")) return false;
+  let depth = 0;
+  for (let index = 0; index < expression.length; index += 1) {
+    if (expression[index] === "(") depth += 1;
+    else if (expression[index] === ")") {
+      depth -= 1;
+      if (depth === 0) return index === expression.length - 1;
+    }
+  }
+  return false;
+}
+
+// A leaf that names no workflow input (always(), steps.*, needs.*, github.*) stays neutral so
+// input-driven rendering never depends on runtime-only context.
+function inputLeafApplies(leaf, inputs) {
+  if (!leaf.includes("inputs.")) return true;
+  const comparison = leaf.match(/^inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'$/);
+  if (comparison) {
+    const value = inputs[comparison[1]];
+    const matches = (value === undefined || value === null ? "" : String(value)) === comparison[3];
+    return comparison[2] === "==" ? matches : !matches;
+  }
+  const reference = leaf.match(/^(!?)inputs\.([A-Za-z0-9_-]+)$/);
+  if (reference) {
+    const truthy = Boolean(inputs[reference[2]]);
+    return reference[1] === "!" ? !truthy : truthy;
   }
   return true;
+}
+
+function inputConditionApplies(condition, inputs) {
+  const expression = condition.trim();
+  const disjuncts = splitTopLevel(expression, "||");
+  if (disjuncts.length > 1) return disjuncts.some((part) => inputConditionApplies(part, inputs));
+  const conjuncts = splitTopLevel(expression, "&&");
+  if (conjuncts.length > 1) return conjuncts.every((part) => inputConditionApplies(part, inputs));
+  if (isWrappedInParentheses(expression)) return inputConditionApplies(expression.slice(1, -1), inputs);
+  return inputLeafApplies(expression, inputs);
 }
 
 function conditionApplies(condition, inputs, actor) {

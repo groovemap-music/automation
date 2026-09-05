@@ -25,6 +25,20 @@ references, checks Dependabot coverage, and scans the current tree for common pr
 patterns. It does not access organization secrets, call GitHub APIs, publish artifacts, or change
 external state.
 
+## Rust compiler cache
+
+Callers that build Rust get the `sccache` compiler cache backed by the GitHub Actions cache, so a
+pull request recompiles only the crates it changed. `reusable-ci.yml` installs the pinned
+`mozilla-actions/sccache-action`, exports `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true`
+before the caller's `setup-command`, and always reports `sccache --show-stats` at the end of
+validation. Caller Justfiles are unchanged.
+
+- `rust-compiler-cache` (boolean, default `true`) enables the cache for `rust` and `mixed` callers.
+  A Rust caller sets it to `false` to opt out; a `mixed` caller that builds no Rust should set it to
+  `false` so the cache steps never run. `python` and `node` callers never run them.
+- `sccache-gha-version` (string, default empty) sets `SCCACHE_GHA_VERSION`, the cache-namespace key.
+  Bumping it discards that caller's existing cache entries and touches no other repository.
+
 ## Repository boundary
 
 - `groovemap-music/automation` owns reusable workflow and composite-action implementation,

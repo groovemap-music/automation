@@ -153,6 +153,16 @@ version tag is emitted. The build receives the commit-derived build date, revisi
 and emits BuildKit SBOM/provenance plus a registry provenance attestation. The reusable release has
 no branch, schedule, floating tag, or unversioned publication path.
 
+`buildkit-cache-mounts` is an optional JSON object mapping a BuildKit cache-mount id to its absolute
+container path. A cache mount is builder-local and a hosted runner's builder starts empty, so each
+mapped directory is restored from the Actions cache into `.buildkit-cache/<id>`, injected into the
+named mount before the build, and extracted back afterwards. The cache key combines the mount ids
+with the hash of `dockerfile` and falls back to a mount-id restore-keys prefix; extraction is skipped
+on an exact key hit because the stored cache already reflects that Dockerfile. Each value must equal
+the `--mount=type=cache,target=` path in the caller's Dockerfile, and callers should exclude
+`.buildkit-cache/` from their Docker build context. The input is empty by default, in which case the
+release performs no cache or injection step and keeps the registry layer cache it already used.
+
 The caller is intentionally small:
 
 ```yaml

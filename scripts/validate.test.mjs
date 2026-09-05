@@ -123,7 +123,7 @@ function runReleaseIdentityRuntime({ artifactVariant = "" } = {}) {
   }
 }
 
-function runBuildkitCacheRuntime(mapping) {
+function runBuildkitCacheRuntime(mapping, { imageName = "fixture-container-worker", runner = "ubuntu-24.04" } = {}) {
   const match = REUSABLE_RELEASE.match(/          python3 - <<'PY'\n([\s\S]*?)\n          PY/);
   assert.ok(match, "BuildKit cache-mount resolver must be present");
   const script = match[1].split("\n").map((line) => line.slice(10)).join("\n");
@@ -136,6 +136,8 @@ function runBuildkitCacheRuntime(mapping) {
       env: {
         ...process.env,
         BUILDKIT_CACHE_MOUNTS: mapping,
+        BUILDKIT_CACHE_IMAGE_NAME: imageName,
+        BUILDKIT_CACHE_RUNNER: runner,
         GITHUB_OUTPUT: output,
       },
     });
@@ -1023,7 +1025,10 @@ test("configured buildkit-cache-mounts inject and extract every named cache moun
     ".buildkit-cache/cargo-registry": "/usr/local/cargo/registry",
     ".buildkit-cache/sccache-cache": "/root/.cache/sccache",
   });
-  assert.equal(rendered.buildkitCacheKeyPrefix, "buildkit-mounts-cargo-registry-sccache-cache");
+  assert.equal(
+    rendered.buildkitCacheKeyPrefix,
+    "buildkit-mounts-cargo-registry-sccache-cache-fixture-container-worker-ubuntu-24-04",
+  );
   for (const name of BUILDKIT_CACHE_STEP_NAMES) assert.ok(rendered.steps.includes(name), name);
   const buildIndex = rendered.steps.indexOf("Build and publish versioned image");
   for (const name of BUILDKIT_CACHE_STEP_NAMES) assert.ok(rendered.steps.indexOf(name) < buildIndex, name);
@@ -1139,7 +1144,10 @@ test("the inline BuildKit cache resolver emits caller-safe paths and fails close
   assert.match(valid.output, /^paths<<GROOVEMAP_BUILDKIT_PATHS$/m);
   assert.match(valid.output, /^\.buildkit-cache\/cargo-registry$/m);
   assert.match(valid.output, /^\.buildkit-cache\/sccache-cache$/m);
-  assert.match(valid.output, /^key-prefix=buildkit-mounts-cargo-registry-sccache-cache$/m);
+  assert.match(
+    valid.output,
+    /^key-prefix=buildkit-mounts-cargo-registry-sccache-cache-fixture-container-worker-ubuntu-24-04$/m,
+  );
   const map = JSON.parse(
     valid.output.match(/cache-map<<GROOVEMAP_BUILDKIT_MAP\n([\s\S]*?)\nGROOVEMAP_BUILDKIT_MAP/)[1],
   );
@@ -1153,6 +1161,56 @@ test("the inline BuildKit cache resolver emits caller-safe paths and fails close
     assert.notEqual(runtime.status, 0, mapping);
     assert.match(runtime.stdout, /::error::buildkit-cache-mounts/);
   }
+});
+
+test("the inline BuildKit cache resolver scopes the key prefix to image name and runner", () => {
+  const baseline = runBuildkitCacheRuntime(BUILDKIT_CACHE_MAPPING, {
+    imageName: "fixture-container-worker",
+    runner: "ubuntu-24.04",
+  });
+  const otherVariant = runBuildkitCacheRuntime(BUILDKIT_CACHE_MAPPING, {
+    imageName: "fixture-container-scanner",
+    runner: "ubuntu-24.04",
+  });
+  const otherRunner = runBuildkitCacheRuntime(BUILDKIT_CACHE_MAPPING, {
+    imageName: "fixture-container-worker",
+    runner: "ubuntu-22.04",
+  });
+  for (const result of [baseline, otherVariant, otherRunner]) assert.equal(result.status, 0, result.stderr);
+
+  const keyPrefix = (result) => result.output.match(/^key-prefix=(.*)$/m)[1];
+  assert.equal(keyPrefix(baseline), "buildkit-mounts-cargo-registry-sccache-cache-fixture-container-worker-ubuntu-24-04");
+  assert.notEqual(keyPrefix(otherVariant), keyPrefix(baseline));
+  assert.notEqual(keyPrefix(otherRunner), keyPrefix(baseline));
+  assert.notEqual(keyPrefix(otherVariant), keyPrefix(otherRunner));
+
+  const selfHosted = runBuildkitCacheRuntime(BUILDKIT_CACHE_MAPPING, {
+    imageName: "fixture-container-worker",
+    runner: "Self Hosted / ARM64!",
+  });
+  assert.equal(selfHosted.status, 0, selfHosted.stderr);
+  assert.match(keyPrefix(selfHosted), /^buildkit-mounts-cargo-registry-sccache-cache-fixture-container-worker-self-hosted-arm64$/);
+});
+
+test("two release callers differing only in image-variant or runner get distinct BuildKit cache key prefixes", () => {
+  const scenario = fixture("container-release.json");
+  const baseline = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    inputs: { ...scenario.inputs, "buildkit-cache-mounts": BUILDKIT_CACHE_MAPPING },
+  });
+  const otherVariant = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    expectedImageName: "fixture-container-scanner",
+    inputs: { ...scenario.inputs, "image-variant": "scanner", "buildkit-cache-mounts": BUILDKIT_CACHE_MAPPING },
+  });
+  const otherRunner = renderReleaseContract(REUSABLE_RELEASE, {
+    ...scenario,
+    inputs: { ...scenario.inputs, runner: "ubuntu-22.04", "buildkit-cache-mounts": BUILDKIT_CACHE_MAPPING },
+  });
+  for (const rendered of [baseline, otherVariant, otherRunner]) assert.deepEqual(rendered.issues, []);
+  assert.notEqual(otherVariant.buildkitCacheKeyPrefix, baseline.buildkitCacheKeyPrefix);
+  assert.notEqual(otherRunner.buildkitCacheKeyPrefix, baseline.buildkitCacheKeyPrefix);
+  assert.notEqual(otherVariant.buildkitCacheKeyPrefix, otherRunner.buildkitCacheKeyPrefix);
 });
 
 const CACHE_STEPS = [
@@ -1274,4 +1332,36 @@ test("cache statistics survive a failed validation step", () => {
 
 test("current repository satisfies the complete shared automation contract", () => {
   assert.deepEqual(validate(), []);
+});
+
+// --- file enumeration honours git's ignore rules (gm-automation-yoa.2) ---
+
+test("the exposure scan skips a locally git-ignored directory but still reports an unignored match", () => {
+  const excludePath = spawnSync("git", ["rev-parse", "--git-path", "info/exclude"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  }).stdout.trim();
+  const originalExclude = readFileSync(excludePath, "utf8");
+  const ignoredDir = resolve(ROOT, ".tmp-validate-ignored-check");
+  const visibleDir = resolve(ROOT, ".tmp-validate-visible-check");
+  const ignoredMarker = ["customer", "id=ignored-741"].join("_");
+  const visibleMarker = ["customer", "id=visible-741"].join("_");
+  try {
+    mkdirSync(ignoredDir, { recursive: true });
+    writeFileSync(resolve(ignoredDir, "note.txt"), ignoredMarker);
+    writeFileSync(excludePath, `${originalExclude}\n/.tmp-validate-ignored-check/\n`);
+
+    mkdirSync(visibleDir, { recursive: true });
+    writeFileSync(resolve(visibleDir, "note.txt"), visibleMarker);
+
+    const errors = validate();
+    assert.ok(!errors.some((error) => error.includes(".tmp-validate-ignored-check")));
+    assert.ok(
+      errors.some((error) => error.includes(".tmp-validate-visible-check") && error.includes("customer-record")),
+    );
+  } finally {
+    writeFileSync(excludePath, originalExclude);
+    rmSync(ignoredDir, { recursive: true, force: true });
+    rmSync(visibleDir, { recursive: true, force: true });
+  }
 });

@@ -7,6 +7,85 @@ function parseScalar(value) {
   return trimmed;
 }
 
+export const JUSTFILE_CAPABILITIES = Object.freeze({
+  default: "list the repository's supported recipes without changing state",
+  setup: "install the pinned local toolchain or locked dependencies",
+  check: "run the complete deterministic, credential-free, offline validation gate",
+  format: "apply deterministic source formatting",
+  "format-check": "verify formatting without modifying files",
+  lint: "run static style and correctness analysis",
+  typecheck: "run static type analysis",
+  test: "run the repository's deterministic test suite",
+  coverage: "generate local coverage evidence",
+  audit: "audit locked dependencies for known vulnerabilities",
+  "license-check": "validate locked dependency licenses",
+  "secret-scan": "scan source and history for committed secrets",
+  build: "build a local distributable artifact",
+  "install-check": "install and smoke-test the built artifact locally",
+  image: "build and inspect a local container image without publishing it",
+  "bump-preview": "preview a version change without modifying files",
+  bump: "apply an explicitly requested version change without publishing it",
+  "release-dry-run": "build and verify release evidence without publishing it",
+});
+
+const CORE_JUST_RECIPES = new Set(["default", "check"]);
+
+export function parseJustfileRecipes(content) {
+  const recipes = new Set();
+  for (const line of content.split("\n")) {
+    const match = line.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+[^:]*)?:/);
+    if (match) recipes.add(match[1]);
+  }
+  return recipes;
+}
+
+export function referencedJustRecipes(command) {
+  if (typeof command !== "string") return [];
+  return [...command.matchAll(/(?:^|(?:&&|\|\||;|\n)\s*)just\s+([A-Za-z0-9][A-Za-z0-9_-]*)\b/g)]
+    .map((match) => match[1]);
+}
+
+export function validateJustfileProvider(
+  content,
+  commands = [],
+  { setupMeaningful = true, extensions = [] } = {},
+) {
+  const recipes = parseJustfileRecipes(content);
+  const issues = [];
+  const extensionSet = new Set();
+  for (const extension of extensions) {
+    if (typeof extension !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(extension)) {
+      issues.push(`provider extension must be a lowercase hyphenated recipe: ${extension}`);
+    } else if (Object.hasOwn(JUSTFILE_CAPABILITIES, extension)) {
+      issues.push(`provider extension duplicates shared capability: ${extension}`);
+    } else if (extensionSet.has(extension)) {
+      issues.push(`provider extension is declared more than once: ${extension}`);
+    } else {
+      extensionSet.add(extension);
+    }
+  }
+  for (const recipe of CORE_JUST_RECIPES) {
+    if (!recipes.has(recipe)) issues.push(`provider Justfile is missing core recipe: ${recipe}`);
+  }
+  if (setupMeaningful && !recipes.has("setup")) {
+    issues.push("provider Justfile is missing setup for a repository with installable tooling or dependencies");
+  }
+  for (const recipe of recipes) {
+    if (!Object.hasOwn(JUSTFILE_CAPABILITIES, recipe) && !extensionSet.has(recipe)) {
+      issues.push(`provider Justfile exposes undocumented recipe: ${recipe}`);
+    }
+  }
+  for (const extension of extensionSet) {
+    if (!recipes.has(extension)) issues.push(`declared provider extension is not implemented: ${extension}`);
+  }
+  for (const command of commands) {
+    for (const recipe of referencedJustRecipes(command)) {
+      if (!recipes.has(recipe)) issues.push(`workflow command references missing Justfile recipe: ${recipe}`);
+    }
+  }
+  return issues;
+}
+
 function parseCallEntries(lines, section) {
   const entries = new Map();
   let activeSection = "";
@@ -166,8 +245,7 @@ function isWrappedInParentheses(expression) {
   return false;
 }
 
-// A leaf that names no workflow input (always(), steps.*, needs.*, github.*) stays neutral so
-// input-driven rendering never depends on runtime-only context.
+// Runtime-only expressions are neutral when rendering an input-selected graph.
 function inputLeafApplies(leaf, inputs) {
   if (!leaf.includes("inputs.")) return true;
   const comparison = leaf.match(/^inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'$/);

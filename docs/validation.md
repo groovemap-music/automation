@@ -6,7 +6,7 @@ The authoritative local command is:
 just check
 ```
 
-It performs three deterministic phases:
+It performs three deterministic groups of checks:
 
 1. Node and Python syntax checks for the validators and tests.
 2. Standard-library behavior tests for links, exposure rules, action pins, dependency policy,

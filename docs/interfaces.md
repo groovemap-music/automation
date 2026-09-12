@@ -12,6 +12,16 @@ lint, type, test, coverage, contract, dependency-audit, license, secret-scan, pa
 integration, and container commands as an ordinary pull request. Optional integration and image
 steps are repository capabilities, not actor-specific fallbacks.
 
+The manifest's complete optional input set is `runner` (`ubuntu-24.04`),
+`rust-compiler-cache` (`auto`), `sccache-gha-version` (empty), `image-command` (empty),
+`integration-command` (empty), all four `e2e-*` commands (empty), `coverage-flags` (`unit`),
+`browser-coverage-mapping` (empty), `upload-codecov` (`false`),
+`requires-private-library` (`false`), `private-library-client-id` (empty), and
+`private-library-revision` (empty). Values in parentheses are defaults. The two optional secrets are
+`PRIVATE_LIBRARY_PRIVATE_KEY` and `CODECOV_TOKEN`. The workflow requests only `contents: read` and
+has no caller-visible outputs; `browser-mapping-valid` is an internal job output used by the
+browser-upload job.
+
 The caller must provide these nonblank inputs:
 
 - `language`: `python`, `rust`, `node`, or `mixed`;
@@ -116,10 +126,10 @@ jobs:
       language: mixed
       setup-command: just setup
       check-command: just check
-      coverage-command: just test
+      coverage-command: just coverage
       audit-command: just audit
       license-command: just license-check
-      secret-scan-command: just source-check
+      secret-scan-command: just secret-scan
       package-command: just build
       install-command: just install-check
       e2e-setup-command: uv run playwright install --with-deps chromium
@@ -162,6 +172,17 @@ workflow once keeps the stable `<repository-name>-<version>` artifact name. A ca
 release jobs for the same tag must give each job a distinct `artifact-variant`; the resulting name
 is `<repository-name>-<version>-<artifact-variant>`. Variants are lowercase hyphen-separated slugs,
 so unsafe or path-like values fail before release work begins.
+
+Its required inputs are `repository-name`, `setup-command`, `check-command`, `release-command`, and
+`artifact-path`. Optional inputs and defaults are `runner` (`ubuntu-24.04`), `artifact-variant`
+(empty), `checksums-path` (`dist/SHA256SUMS`), `notices-path`
+(`dist/THIRD_PARTY_NOTICES.json`), `sbom-path` (`dist/sbom.json`), `publish-image` (`false`),
+`image-variant` (empty), `build-context` (`.`), `dockerfile` (`Dockerfile`),
+`buildkit-cache-mounts` (empty), `prepare-image-command` (empty),
+`requires-private-library` (`false`), `private-library-client-id` (empty), and
+`private-library-revision` (empty). `PRIVATE_LIBRARY_PRIVATE_KEY` is the only declared secret. The
+workflow has no caller-visible outputs and requests `contents: read`, plus `attestations: write`,
+`id-token: write`, and `packages: write` for its release evidence and optional image path.
 
 When `publish-image` is true, the image is
 `ghcr.io/<owner>/<repository-name>` or `ghcr.io/<owner>/<repository-name>-<image-variant>`. Only the
@@ -218,8 +239,10 @@ interface.
 
 ## Composite actions
 
-`.github/actions/setup-tools` installs the caller's `.mise.toml` toolchain using the pinned mise
-action and its cache. `.github/actions/validate-python-policy` applies GrooveMap's shared Python
-configuration policy with Python standard-library code. Callers reference either action through
-the same full-SHA `groovemap-music/automation` path; reusable workflows inline their small setup
-step so they do not contain a mutable self-reference.
+`.github/actions/setup-tools` has no inputs or outputs; it installs the caller's `.mise.toml`
+toolchain using the pinned mise action and its cache. `.github/actions/validate-python-policy` also
+has no inputs or outputs and applies GrooveMap's shared Python configuration policy with Python
+standard-library code. Composite actions declare no permissions or secrets of their own and run
+within the caller job's explicit boundary. Callers reference either action through the same
+full-SHA `groovemap-music/automation` path; reusable workflows inline their small setup step so
+they do not contain a mutable self-reference.

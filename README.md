@@ -6,9 +6,9 @@ Node, mixed, container, coverage, security, package, and install checks, plus an
 tag-release path. Callers select their repository-owned commands and consume these interfaces at
 immutable full commit revisions.
 
-The contract is [ready for caller migration](docs/readiness.md) after review and merge. The
-repository remains private until the separately approved organization-wide visibility change;
-validation and release-contract tests do not change that state.
+The maintained contract and its local evidence are summarized in [contract status](docs/readiness.md).
+Repository visibility is an operator-controlled concern; validation and release-contract tests do
+not change it.
 
 ## Development
 
@@ -63,7 +63,8 @@ Callers that build Rust get the `sccache` compiler cache backed by the GitHub Ac
 pull request recompiles only the crates it changed. `reusable-ci.yml` installs the pinned
 `mozilla-actions/sccache-action`, exports `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true`
 before the caller's `setup-command`, and always reports `sccache --show-stats` at the end of
-validation. Caller Justfiles are unchanged.
+validation. Caller commands remain repository-owned and follow the documented
+[Justfile capability contract](docs/justfile-contract.md).
 
 - `rust-compiler-cache` (string, default `auto`) selects the mode. `auto` enables the cache for
   `rust` callers only, `on` also enables it for a `mixed` caller that builds Rust, and `off` disables
@@ -75,7 +76,7 @@ validation. Caller Justfiles are unchanged.
 ## Repository boundary
 
 - `groovemap-music/automation` owns reusable workflow and composite-action implementation,
-  interface documentation, fixtures, and contract tests.
+  interface documentation, fixtures, and contract tests under accepted ADR 0002.
 - Caller repositories own their language-, service-, and image-specific commands and pin this
   repository by full commit revision.
 - `groovemap-music/.github` owns the organization profile and shared community-health files.
@@ -89,8 +90,8 @@ artifacts belong here. Examples and fixtures must use reserved synthetic values.
 
 See the [documentation index](docs/README.md) for the architecture, governance boundary, and
 local validation contract. The [interface guide](docs/interfaces.md) documents every reusable
-input, failure mode, permission, and release invariant, while the [readiness guide](docs/readiness.md)
-records the caller-migration proof and publication gate. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+input, failure mode, permission, and release invariant, while [contract status](docs/readiness.md)
+records the local proof and operator-controlled publication boundary. Read [CONTRIBUTING.md](CONTRIBUTING.md)
 before proposing a change and [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 ## License

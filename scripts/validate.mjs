@@ -36,6 +36,7 @@ const REQUIRED_FILES = [
   "docs/architecture.md",
   "docs/governance.md",
   "docs/interfaces.md",
+  "docs/justfile-contract.md",
   "docs/readiness.md",
   "docs/validation.md",
   "fixtures/contracts/container-ci.json",
@@ -90,11 +91,7 @@ function walk(directory) {
   return files;
 }
 
-// Enumerates candidate files the way `git` sees them (tracked plus untracked-but-not-ignored),
-// so a locally ignored directory (e.g. excluded via .git/info/exclude) is never scanned on a
-// developer machine even though CI, which starts from a clean checkout, would never see it
-// either way. Falls back to a plain directory walk when git is unavailable or `root` isn't a
-// repository; the explicit skip list still guards both paths.
+// Match Git's tracked and unignored file boundary; use the same skip list without Git.
 function listGitFiles(root) {
   const output = execFileSync(
     "git",
@@ -419,9 +416,9 @@ function checkLegalBoundary(errors) {
 function checkAutomationPolicy(errors, files) {
   const workflowPaths = files.filter((path) => path.includes(`${resolve(ROOT, ".github/workflows")}/`) && /\.ya?ml$/.test(path));
   const actionPaths = files.filter((path) => path.includes(`${resolve(ROOT, ".github/actions")}/`) && /action\.ya?ml$/.test(path));
-  const workflows = workflowPaths.map((path) => readFileSync(path, "utf8")).join("\n");
-  for (const path of [...workflowPaths, ...actionPaths]) {
-    const content = readFileSync(path, "utf8");
+  const sources = new Map([...workflowPaths, ...actionPaths].map((path) => [path, readFileSync(path, "utf8")]));
+  const workflows = workflowPaths.map((path) => sources.get(path)).join("\n");
+  for (const [path, content] of sources) {
     for (const line of content.split("\n")) {
       const issue = validateActionPin(line);
       if (issue) errors.push(`${relative(ROOT, path)}: ${issue}`);
@@ -432,12 +429,12 @@ function checkAutomationPolicy(errors, files) {
   }
 
   for (const path of workflowPaths.filter((path) => path.includes("reusable-"))) {
-    errors.push(...workflowContractIssues(relative(ROOT, path), readFileSync(path, "utf8")));
+    errors.push(...workflowContractIssues(relative(ROOT, path), sources.get(path)));
   }
 
   const ci = readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8");
   if (!ci.includes("permissions:\n  contents: read")) errors.push(".github/workflows/ci.yml: read-only contents permission is required");
-  if (ci.includes("secrets.") || ci.includes("secrets: inherit")) errors.push(".github/workflows/ci.yml: foundation validation must not use secrets");
+  if (ci.includes("secrets.") || ci.includes("secrets: inherit")) errors.push(".github/workflows/ci.yml: repository validation must not use secrets");
 
   const dependabot = readFileSync(resolve(ROOT, ".github/dependabot.yml"), "utf8");
   const ecosystems = detectEcosystems(ROOT, files, workflows);

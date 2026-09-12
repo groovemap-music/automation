@@ -1373,8 +1373,6 @@ test("current repository satisfies the complete shared automation contract", () 
   assert.deepEqual(validate(), []);
 });
 
-// --- file enumeration honours git's ignore rules (gm-automation-yoa.2) ---
-
 test("the exposure scan skips a locally git-ignored directory but still reports an unignored match", () => {
   const excludePath = spawnSync("git", ["rev-parse", "--git-path", "info/exclude"], {
     cwd: ROOT,

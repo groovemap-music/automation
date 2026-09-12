@@ -226,8 +226,7 @@ function isWrappedInParentheses(expression) {
   return false;
 }
 
-// A leaf that names no workflow input (always(), steps.*, needs.*, github.*) stays neutral so
-// input-driven rendering never depends on runtime-only context.
+// Runtime-only expressions are neutral when rendering an input-selected graph.
 function inputLeafApplies(leaf, inputs) {
   if (!leaf.includes("inputs.")) return true;
   const comparison = leaf.match(/^inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'$/);

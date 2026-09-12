@@ -82,6 +82,21 @@ test("rejects unresolved workflow recipe references and undocumented interface d
   }), ["provider Justfile exposes undocumented recipe: custom-gate"]);
 });
 
+test("documents every reusable workflow input, secret, permission, and output boundary", () => {
+  const documentation = readFileSync(resolve(ROOT, "docs/interfaces.md"), "utf8");
+  for (const source of [REUSABLE_CI, REUSABLE_RELEASE]) {
+    const definition = parseWorkflowDefinition(source);
+    for (const name of [...definition.inputs.keys(), ...definition.secrets.keys()]) {
+      assert.ok(documentation.includes(`\`${name}\``), name);
+    }
+    const permissions = source.match(/^permissions:\n((?:  [^\n]+\n)+)/m)?.[1] ?? "";
+    for (const match of permissions.matchAll(/^  ([a-z-]+): (read|write|none)$/gm)) {
+      assert.ok(documentation.includes(`\`${match[1]}: ${match[2]}\``), match[0]);
+    }
+  }
+  assert.match(documentation, /no caller-visible outputs/);
+});
+
 function runInterfaceRuntime({
   browserMapping = "",
   coverageFiles = "coverage.xml",

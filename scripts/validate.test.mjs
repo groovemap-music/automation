@@ -71,6 +71,14 @@ test("accepts full and documented no-setup provider fixtures", () => {
   assert.deepEqual([...parseJustfileRecipes(justfileFixture("static.just"))], ["default", "check"]);
 });
 
+test("accepts explicitly declared repository-specific provider extensions", () => {
+  assert.deepEqual(validateJustfileProvider(
+    justfileFixture("domain.just"),
+    ["just check", "just catalog-check", "just serve-local"],
+    { extensions: ["catalog-check", "serve-local"] },
+  ), []);
+});
+
 test("rejects unresolved workflow recipe references and undocumented interface drift", () => {
   const provider = justfileFixture("static.just");
   assert.deepEqual(referencedJustRecipes("just check && just audit\njust build"), ["check", "audit", "build"]);
@@ -80,6 +88,15 @@ test("rejects unresolved workflow recipe references and undocumented interface d
   assert.deepEqual(validateJustfileProvider(`${provider}\ncustom-gate:\n    true\n`, [], {
     setupMeaningful: false,
   }), ["provider Justfile exposes undocumented recipe: custom-gate"]);
+  assert.deepEqual(validateJustfileProvider(provider, [], {
+    setupMeaningful: false,
+    extensions: ["missing-extension", "check", "Bad_Name", "missing-extension"],
+  }), [
+    "provider extension duplicates shared capability: check",
+    "provider extension must be a lowercase hyphenated recipe: Bad_Name",
+    "provider extension is declared more than once: missing-extension",
+    "declared provider extension is not implemented: missing-extension",
+  ]);
 });
 
 test("documents every reusable workflow input, secret, permission, and output boundary", () => {

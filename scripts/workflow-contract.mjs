@@ -45,9 +45,25 @@ export function referencedJustRecipes(command) {
     .map((match) => match[1]);
 }
 
-export function validateJustfileProvider(content, commands = [], { setupMeaningful = true } = {}) {
+export function validateJustfileProvider(
+  content,
+  commands = [],
+  { setupMeaningful = true, extensions = [] } = {},
+) {
   const recipes = parseJustfileRecipes(content);
   const issues = [];
+  const extensionSet = new Set();
+  for (const extension of extensions) {
+    if (typeof extension !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(extension)) {
+      issues.push(`provider extension must be a lowercase hyphenated recipe: ${extension}`);
+    } else if (Object.hasOwn(JUSTFILE_CAPABILITIES, extension)) {
+      issues.push(`provider extension duplicates shared capability: ${extension}`);
+    } else if (extensionSet.has(extension)) {
+      issues.push(`provider extension is declared more than once: ${extension}`);
+    } else {
+      extensionSet.add(extension);
+    }
+  }
   for (const recipe of CORE_JUST_RECIPES) {
     if (!recipes.has(recipe)) issues.push(`provider Justfile is missing core recipe: ${recipe}`);
   }
@@ -55,9 +71,12 @@ export function validateJustfileProvider(content, commands = [], { setupMeaningf
     issues.push("provider Justfile is missing setup for a repository with installable tooling or dependencies");
   }
   for (const recipe of recipes) {
-    if (!Object.hasOwn(JUSTFILE_CAPABILITIES, recipe)) {
+    if (!Object.hasOwn(JUSTFILE_CAPABILITIES, recipe) && !extensionSet.has(recipe)) {
       issues.push(`provider Justfile exposes undocumented recipe: ${recipe}`);
     }
+  }
+  for (const extension of extensionSet) {
+    if (!recipes.has(extension)) issues.push(`declared provider extension is not implemented: ${extension}`);
   }
   for (const command of commands) {
     for (const recipe of referencedJustRecipes(command)) {

@@ -32,6 +32,18 @@ implemented only when meaningful to the repository.
 | `bump` | apply an explicitly requested version change without publishing it |
 | `release-dry-run` | build and verify release evidence without publishing it |
 
+## Repository-specific extensions
+
+A repository may expose domain or operator recipes that have no fleet-wide meaning, such as
+`catalog-check` or `serve-local`. Its provider-contract validation must declare each extension by
+its lowercase, hyphenated recipe name. An undeclared recipe, a stale declaration with no matching
+recipe, a duplicate declaration, or an attempt to redeclare a shared capability fails validation.
+
+Extensions remain local: declaration permits the provider and its own workflow references to use
+the recipe, but does not add it to the shared vocabulary or give other repositories permission to
+depend on its name or behavior. A stateful or network-backed extension also remains outside
+`check`, even when explicitly declared.
+
 ## Execution boundaries
 
 `check` is safe in a clean checkout and uses no credentials, network services, container registry,

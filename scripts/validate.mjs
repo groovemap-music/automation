@@ -36,6 +36,7 @@ const REQUIRED_FILES = [
   "docs/architecture.md",
   "docs/governance.md",
   "docs/interfaces.md",
+  "docs/justfile-contract.md",
   "docs/readiness.md",
   "docs/validation.md",
   "fixtures/contracts/container-ci.json",

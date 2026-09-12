@@ -26,6 +26,9 @@ import {
 } from "./validate.mjs";
 import {
   parseWorkflowDefinition,
+  JUSTFILE_CAPABILITIES,
+  parseJustfileRecipes,
+  referencedJustRecipes,
   renderCiContract,
   renderReleaseContract,
   validateBrowserCoverageMapping,
@@ -34,6 +37,7 @@ import {
   validateDependabotLabels,
   validateWorkflowCall,
   validateWorkflowSource,
+  validateJustfileProvider,
 } from "./workflow-contract.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -42,6 +46,41 @@ const REUSABLE_RELEASE = readFileSync(resolve(ROOT, ".github/workflows/reusable-
 const DEPENDABOT = readFileSync(resolve(ROOT, ".github/dependabot.yml"), "utf8");
 const FIXTURE_ROOT = resolve(ROOT, "fixtures/contracts");
 const fixture = (name) => JSON.parse(readFileSync(resolve(FIXTURE_ROOT, name), "utf8"));
+
+const justfileFixture = (name) => readFileSync(resolve(ROOT, "fixtures/justfiles", name), "utf8");
+
+test("defines the documented Justfile capability vocabulary", () => {
+  assert.deepEqual(Object.keys(JUSTFILE_CAPABILITIES), [
+    "default", "setup", "check", "format", "format-check", "lint", "typecheck", "test",
+    "coverage", "audit", "license-check", "secret-scan", "build", "install-check", "image",
+    "bump-preview", "bump", "release-dry-run",
+  ]);
+  const documentation = readFileSync(resolve(ROOT, "docs/justfile-contract.md"), "utf8");
+  for (const [recipe, semantics] of Object.entries(JUSTFILE_CAPABILITIES)) {
+    assert.ok(documentation.includes(`| \`${recipe}\` | ${semantics} |`), recipe);
+  }
+});
+
+test("accepts full and documented no-setup provider fixtures", () => {
+  assert.deepEqual(validateJustfileProvider(justfileFixture("full.just"), [
+    "just setup", "just check", "just coverage", "just release-dry-run",
+  ]), []);
+  assert.deepEqual(validateJustfileProvider(justfileFixture("static.just"), ["just check"], {
+    setupMeaningful: false,
+  }), []);
+  assert.deepEqual([...parseJustfileRecipes(justfileFixture("static.just"))], ["default", "check"]);
+});
+
+test("rejects unresolved workflow recipe references and undocumented interface drift", () => {
+  const provider = justfileFixture("static.just");
+  assert.deepEqual(referencedJustRecipes("just check && just audit\njust build"), ["check", "audit", "build"]);
+  assert.deepEqual(validateJustfileProvider(provider, ["just missing"], { setupMeaningful: false }), [
+    "workflow command references missing Justfile recipe: missing",
+  ]);
+  assert.deepEqual(validateJustfileProvider(`${provider}\ncustom-gate:\n    true\n`, [], {
+    setupMeaningful: false,
+  }), ["provider Justfile exposes undocumented recipe: custom-gate"]);
+});
 
 function runInterfaceRuntime({
   browserMapping = "",

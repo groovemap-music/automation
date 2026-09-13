@@ -4,7 +4,8 @@
 
 Under accepted ADR 0002, this repository owns reusable workflows, composite actions, synthetic
 fixtures, public interface documentation, and tests for those interfaces. The organization
-`.github` repository does not own reusable CI. All content here must be suitable for public review.
+`.github` repository does not own reusable CI. This repository is public, and all content here must
+remain suitable for public review.
 
 The MIT license covers repository source. It does not grant rights to GrooveMap names or logos,
 and it does not replace the licenses of third-party actions or tools.
@@ -16,11 +17,11 @@ The `.github` repository owns organization profile and shared community-health c
 issue-label taxonomy. Dependabot configuration here may reference only labels declared by that
 OpenTofu-managed taxonomy.
 
-The declared dependency labels are `dependencies` and `github-actions`. Their live creation and
-fleet convergence remain gated on a separately approved OpenTofu apply. Repository validation
-checks the declared contract but does not apply infrastructure. The source contract and local
-validation are independent of repository visibility; changing visibility requires a separately
-approved organization operation and completion of the external label gate.
+The declared dependency labels are `dependencies` and `github-actions`. Their initial creation,
+the repository visibility change, and caller convergence were separate organization operations;
+those publication gates are completed historical evidence. Repository validation checks the
+declared contract but does not apply infrastructure. Future visibility, settings, or label changes
+remain operator-controlled through their owning boundary.
 
 Private deployment instructions and operational procedures remain in their owning private
 repositories. Redacting such material is not a publication strategy; it must not enter this

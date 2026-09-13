@@ -1,6 +1,6 @@
 # GrooveMap automation
 
-`automation` is the publication-ready source of reusable GitHub Actions workflows and composite
+`automation` is the public source of reusable GitHub Actions workflows and composite
 actions for GrooveMap repositories. It provides a complete pull-request gate for Python, Rust,
 Node, mixed, container, coverage, security, package, and install checks, plus an attested
 tag-release path. Callers select their repository-owned commands and consume these interfaces at
@@ -75,7 +75,8 @@ validation. Caller commands remain repository-owned and follow the documented
 
 ## Repository boundary
 
-- `groovemap-music/automation` owns reusable workflow and composite-action implementation,
+- The public `groovemap-music/automation` repository solely owns reusable workflow and
+  composite-action implementation,
   interface documentation, fixtures, and contract tests under accepted ADR 0002.
 - Caller repositories own their language-, service-, and image-specific commands and pin this
   repository by full commit revision.

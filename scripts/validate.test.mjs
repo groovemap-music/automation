@@ -114,6 +114,25 @@ test("documents every reusable workflow input, secret, permission, and output bo
   assert.match(documentation, /no caller-visible outputs/);
 });
 
+test("records public automation ownership and retained private-library compatibility", () => {
+  const readiness = readFileSync(resolve(ROOT, "docs/readiness.md"), "utf8");
+  assert.match(
+    readiness,
+    /public `groovemap-music\/automation` repository is the sole shared workflow and composite-action\s+owner/,
+  );
+  assert.match(readiness, /## Completed public-library cutover/);
+  assert.match(readiness, /all active\s+callers consume its interfaces through reviewed forty-character commit revisions/);
+  assert.doesNotMatch(readiness, /remains\s+private/);
+  for (const marker of [
+    "`requires-private-library`",
+    "`private-library-client-id`",
+    "`private-library-revision`",
+    "`PRIVATE_LIBRARY_PRIVATE_KEY`",
+  ]) {
+    assert.ok(readiness.includes(marker), marker);
+  }
+});
+
 function runInterfaceRuntime({
   browserMapping = "",
   coverageFiles = "coverage.xml",

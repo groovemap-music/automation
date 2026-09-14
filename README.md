@@ -25,6 +25,10 @@ references, checks Dependabot coverage, and scans the current tree for common pr
 patterns. It does not access organization secrets, call GitHub APIs, publish artifacts, or change
 external state.
 
+Python callers can also pin the credential-free
+[`validate-database-fixtures`](docs/interfaces.md#composite-actions) composite action to reject new
+unspecced Neo4j and PostgreSQL pytest fixtures before running their repository-owned `just check`.
+
 ## Release image build caching
 
 `.github/workflows/reusable-release.yml` accepts an optional `buildkit-cache-mounts` input: a JSON

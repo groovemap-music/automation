@@ -242,7 +242,36 @@ interface.
 `.github/actions/setup-tools` has no inputs or outputs; it installs the caller's `.mise.toml`
 toolchain using the pinned mise action and its cache. `.github/actions/validate-python-policy` also
 has no inputs or outputs and applies GrooveMap's shared Python configuration policy with Python
-standard-library code. Composite actions declare no permissions or secrets of their own and run
-within the caller job's explicit boundary. Callers reference either action through the same
-full-SHA `groovemap-music/automation` path; reusable workflows inline their small setup step so
-they do not contain a mutable self-reference.
+standard-library code.
+
+`.github/actions/validate-database-fixtures` scans the caller's `tests` directory by default and
+rejects unspecced `Mock`, `MagicMock`, and `AsyncMock` construction inside pytest fixtures whose
+source identifies a Neo4j, psycopg, or PostgreSQL boundary. The optional `paths` input is a
+newline-separated list of repository-relative Python files or directories. The checker reports
+repository-local paths and lines and runs without importing the caller's application or database
+drivers. A boundary with no importable runtime interface may exempt one constructor call with a
+nonempty reason on that call's source line:
+
+```python
+adapter = AsyncMock()  # groovemap-db-fixture: allow-unspecced(plugin protocol has no runtime type)
+```
+
+Do not exempt a file or fixture. Prefer `create_autospec(Interface, instance=True, spec_set=True)`,
+`Mock(spec=Interface)`, or `Mock(spec_set=Interface)`. A caller can place the action immediately
+before its authoritative `just check` step:
+
+```yaml
+- uses: groovemap-music/automation/.github/actions/validate-database-fixtures@<full-commit-sha>
+  with:
+    paths: tests
+- run: just check
+```
+
+For repository-local integration, vendor the reviewed `validate.py` at an immutable revision and
+invoke `python3 scripts/validate-database-fixtures.py .` from the caller's `just check` recipe. The
+script defaults to `tests`; additional repository-relative paths can follow the root argument.
+
+Composite actions declare no permissions or secrets of their own and run within the caller job's
+explicit boundary. Callers reference actions through the same full-SHA
+`groovemap-music/automation` path; reusable workflows inline their small setup step so they do not
+contain a mutable self-reference.

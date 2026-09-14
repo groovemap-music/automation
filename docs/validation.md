@@ -10,8 +10,9 @@ It performs three deterministic groups of checks:
 
 1. Node and Python syntax checks for the validators and tests.
 2. Standard-library behavior tests for links, exposure rules, action pins, dependency policy,
-   rendered Python/Rust/Node/container job contracts, invariant Dependabot behavior, five distinct
-   Graph Explorer browser uploads, and tag-release identity and evidence.
+   specced Neo4j/PostgreSQL pytest fixtures, rendered Python/Rust/Node/container job contracts,
+   invariant Dependabot behavior, five distinct Graph Explorer browser uploads, and tag-release
+   identity and evidence.
 3. Repository validation covering required files, Markdown/local links, MIT and notice metadata,
    Mermaid diagrams, CI permissions, Dependabot ecosystems/labels, immutable action references,
    reusable interface contracts, tag-only publication, and private-material patterns.
@@ -35,6 +36,12 @@ nested-only roundtrip fixture simulates the artifact action stripping its single
 `coverage/unit.xml`, `coverage/e2e/chromium/lcov.info`, and nested failure results must be restored
 at those same workspace-relative paths. Separate negative cases prove that symlink traversal and a
 pre-existing destination collision fail closed.
+
+The database-fixture action has separate positive and negative examples under
+`fixtures/database-fixtures`. Its behavior test proves that autospecced and explicitly specced
+database doubles pass, an unrelated HTTP double is ignored, a line-scoped exemption requires a
+reason, and permissive Neo4j/PostgreSQL fixtures fail with repository-local paths. The checker
+parses Python source only; it does not import database drivers or open a connection.
 
 The command reads only the checkout and creates no tracked files. It does not require a package
 install, network connection, GitHub token, organization secret, container runtime, or live service.

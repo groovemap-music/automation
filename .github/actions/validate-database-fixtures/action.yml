@@ -1,0 +1,17 @@
+name: Validate database fixtures
+description: Reject permissive Neo4j and PostgreSQL pytest fixtures before they can hide interface drift.
+
+inputs:
+  paths:
+    description: Newline-separated repository-relative Python files or directories to scan.
+    required: false
+    default: tests
+
+runs:
+  using: composite
+  steps:
+    - name: Validate Neo4j and PostgreSQL fixture mocks
+      shell: bash
+      env:
+        GROOVEMAP_DATABASE_FIXTURE_PATHS: ${{ inputs.paths }}
+      run: python3 "${{ github.action_path }}/validate.py" "${GITHUB_WORKSPACE}"

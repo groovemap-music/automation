@@ -17,6 +17,8 @@ const ALLOWED_EXTERNAL_HOSTS = new Set(["github.com", "groovemap.music"]);
 const REQUIRED_FILES = [
   ".github/CODEOWNERS",
   ".github/actions/setup-tools/action.yml",
+  ".github/actions/validate-database-fixtures/action.yml",
+  ".github/actions/validate-database-fixtures/validate.py",
   ".github/actions/validate-python-policy/action.yml",
   ".github/actions/validate-python-policy/validate.py",
   ".github/dependabot.yml",
@@ -45,6 +47,9 @@ const REQUIRED_FILES = [
   "fixtures/contracts/node-ci.json",
   "fixtures/contracts/python-ci.json",
   "fixtures/contracts/rust-ci.json",
+  "fixtures/database-fixtures/invalid/tests/conftest.py",
+  "fixtures/database-fixtures/valid/tests/conftest.py",
+  "scripts/validate-database-fixtures.test.py",
   "scripts/validate.mjs",
   "scripts/validate.test.mjs",
   "scripts/workflow-contract.mjs",

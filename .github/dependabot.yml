@@ -7,3 +7,9 @@ updates:
       day: monday
     labels: [dependencies, github-actions]
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
+      github-actions-security:
+        applies-to: security-updates
+        patterns: ["*"]

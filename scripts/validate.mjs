@@ -14,6 +14,9 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MIT_SHA256 = "38b811191c91cc9577669a398064070bfed40c462bd084b789de409144f1b129";
 const ALLOWED_EXTERNAL_HOSTS = new Set(["github.com", "groovemap.music"]);
+const ACTIONS_ALLOWLIST_PATH = "policy/actions-allowlist.json";
+// GitHub counts an action as GitHub-owned when it lives under one of these two owners.
+const GITHUB_OWNED_OWNERS = new Set(["actions", "github"]);
 const REQUIRED_FILES = [
   ".github/CODEOWNERS",
   ".github/actions/setup-tools/action.yml",
@@ -49,6 +52,7 @@ const REQUIRED_FILES = [
   "fixtures/contracts/rust-ci.json",
   "fixtures/database-fixtures/invalid/tests/conftest.py",
   "fixtures/database-fixtures/valid/tests/conftest.py",
+  "policy/actions-allowlist.json",
   "scripts/validate-database-fixtures.test.py",
   "scripts/validate.mjs",
   "scripts/validate.test.mjs",
@@ -140,10 +144,18 @@ export function validateActionReference(reference) {
   return `action reference must use a local path or immutable digest: ${reference}`;
 }
 
-export function validateActionPin(line) {
+// The single `uses:` line matcher every action policy check reads its reference from.
+export function parseActionUses(line) {
   const match = line.match(/^\s*(?:-\s*)?uses:\s*([^\s#]+)(.*)$/);
   if (!match) return null;
   const [, reference, remainder] = match;
+  return { reference, remainder };
+}
+
+export function validateActionPin(line) {
+  const parsed = parseActionUses(line);
+  if (!parsed) return null;
+  const { reference, remainder } = parsed;
   const referenceIssue = validateActionReference(reference);
   if (referenceIssue) return referenceIssue;
   if (reference.startsWith("./")) return null;
@@ -151,6 +163,65 @@ export function validateActionPin(line) {
     return `pinned action must record its released version in a trailing comment: ${reference}`;
   }
   return null;
+}
+
+// Split `owner/repo[/path]@ref` the way GitHub does: the ref is whatever follows the final `@`.
+function splitActionReference(value) {
+  const separator = value.lastIndexOf("@");
+  if (separator < 0) return { name: value, ref: "" };
+  return { name: value.slice(0, separator), ref: value.slice(separator + 1) };
+}
+
+function globToRegExp(pattern, wildcard) {
+  const source = pattern
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(wildcard);
+  return new RegExp(`^${source}$`);
+}
+
+// GitHub allowlist semantics: `*` never crosses a path separator in the owner/repo/path half, so
+// `owner/repo@*` admits any ref of that repository without admitting its sub-path workflows, while
+// `owner/repo/path@*` and an exact `owner/repo@<sha>` admit exactly what they spell.
+export function matchesActionPattern(reference, pattern) {
+  const target = splitActionReference(reference);
+  const allowed = splitActionReference(pattern);
+  return globToRegExp(allowed.name, "[^/]*").test(target.name)
+    && globToRegExp(allowed.ref || "*", ".*").test(target.ref);
+}
+
+export function allowlistSnapshotIssues(snapshot) {
+  const issues = [];
+  for (const field of ["github_owned_allowed", "verified_allowed"]) {
+    if (typeof snapshot?.[field] !== "boolean") issues.push(`${field} must be a boolean`);
+  }
+  const patterns = snapshot?.patterns_allowed;
+  if (!Array.isArray(patterns) || patterns.some((pattern) => typeof pattern !== "string" || pattern === "")) {
+    issues.push("patterns_allowed must be an array of nonempty strings");
+  }
+  return issues;
+}
+
+// Pure policy decision against the recorded organization snapshot; it makes no network call.
+// `verified_allowed` is recorded but never grants a reference, because creator verification cannot
+// be established offline — a verified creator's action still needs its own recorded pattern.
+export function validateActionAllowlist(reference, snapshot) {
+  if (reference.startsWith("./")) return null;
+  if (reference.startsWith("docker://")) return null;
+  const { name } = splitActionReference(reference);
+  if (snapshot?.github_owned_allowed && GITHUB_OWNED_OWNERS.has(name.split("/")[0])) return null;
+  const patterns = Array.isArray(snapshot?.patterns_allowed) ? snapshot.patterns_allowed : [];
+  if (patterns.some((pattern) => matchesActionPattern(reference, pattern))) return null;
+  return `action is not in the organization Actions allowlist: ${reference}`;
+}
+
+export function validateActionAllowlistLine(line, snapshot) {
+  const parsed = parseActionUses(line);
+  return parsed ? validateActionAllowlist(parsed.reference, snapshot) : null;
+}
+
+export function readActionsAllowlist(root = ROOT) {
+  return JSON.parse(readFileSync(resolve(root, ACTIONS_ALLOWLIST_PATH), "utf8"));
 }
 
 function requireMarkers(errors, path, content, markers) {
@@ -418,15 +489,32 @@ function checkLegalBoundary(errors) {
   }
 }
 
+function loadAllowlistSnapshot(errors) {
+  let snapshot;
+  try {
+    snapshot = readActionsAllowlist();
+  } catch {
+    errors.push(`${ACTIONS_ALLOWLIST_PATH}: allowlist snapshot is missing or is not valid JSON`);
+    return null;
+  }
+  const issues = allowlistSnapshotIssues(snapshot);
+  for (const issue of issues) errors.push(`${ACTIONS_ALLOWLIST_PATH}: ${issue}`);
+  return issues.length > 0 ? null : snapshot;
+}
+
 function checkAutomationPolicy(errors, files) {
   const workflowPaths = files.filter((path) => path.includes(`${resolve(ROOT, ".github/workflows")}/`) && /\.ya?ml$/.test(path));
   const actionPaths = files.filter((path) => path.includes(`${resolve(ROOT, ".github/actions")}/`) && /action\.ya?ml$/.test(path));
   const sources = new Map([...workflowPaths, ...actionPaths].map((path) => [path, readFileSync(path, "utf8")]));
   const workflows = workflowPaths.map((path) => sources.get(path)).join("\n");
+  const allowlist = loadAllowlistSnapshot(errors);
   for (const [path, content] of sources) {
-    for (const line of content.split("\n")) {
+    const lines = content.split("\n");
+    for (const [index, line] of lines.entries()) {
       const issue = validateActionPin(line);
       if (issue) errors.push(`${relative(ROOT, path)}: ${issue}`);
+      const allowlistIssue = allowlist && validateActionAllowlistLine(line, allowlist);
+      if (allowlistIssue) errors.push(`${relative(ROOT, path)}:${index + 1}: ${allowlistIssue}`);
     }
     if (workflowPaths.includes(path)) {
       errors.push(...validateWorkflowSource(content).map((issue) => `${relative(ROOT, path)}: ${issue}`));

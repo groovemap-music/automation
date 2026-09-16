@@ -16,10 +16,15 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  allowlistSnapshotIssues,
   detectEcosystems,
   extractLinks,
   findExposureIssues,
+  matchesActionPattern,
+  readActionsAllowlist,
   validate,
+  validateActionAllowlist,
+  validateActionAllowlistLine,
   validateActionPin,
   validateActionReference,
   workflowContractIssues,
@@ -258,6 +263,76 @@ test("accepts local and full-revision action references only", () => {
   assert.equal(validateActionReference("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"), null);
   assert.match(validateActionReference("actions/checkout@main"), /immutable digest/);
   assert.match(validateActionReference("actions/checkout@v7"), /immutable digest/);
+});
+
+const ALLOWLIST = readActionsAllowlist();
+const REVISION = "a".repeat(40);
+
+test("records the organization selected-actions snapshot in its API response shape", () => {
+  assert.deepEqual(allowlistSnapshotIssues(ALLOWLIST), []);
+  assert.deepEqual(Object.keys(ALLOWLIST), ["github_owned_allowed", "verified_allowed", "patterns_allowed"]);
+  assert.equal(ALLOWLIST.github_owned_allowed, true);
+  assert.equal(ALLOWLIST.verified_allowed, false);
+  assert.ok(ALLOWLIST.patterns_allowed.includes("mozilla-actions/sccache-action@*"));
+
+  assert.deepEqual(allowlistSnapshotIssues({ verified_allowed: false, patterns_allowed: [] }), [
+    "github_owned_allowed must be a boolean",
+  ]);
+  assert.deepEqual(allowlistSnapshotIssues({ github_owned_allowed: true, verified_allowed: false }), [
+    "patterns_allowed must be an array of nonempty strings",
+  ]);
+});
+
+test("applies GitHub allowlist pattern semantics to repository, sub-path, and exact-revision entries", () => {
+  assert.ok(matchesActionPattern(`jdx/mise-action@${REVISION}`, "jdx/mise-action@*"));
+  assert.ok(!matchesActionPattern(`jdx/mise-action-fork@${REVISION}`, "jdx/mise-action@*"));
+  assert.ok(matchesActionPattern(
+    `groovemap-music/automation/.github/workflows/reusable-ci.yml@${REVISION}`,
+    "groovemap-music/automation/.github/workflows/*.yml@*",
+  ));
+  assert.ok(!matchesActionPattern(`groovemap-music/automation/scripts/release@${REVISION}`, "groovemap-music/automation@*"));
+  const dance = "reproducible-containers/buildkit-cache-dance";
+  assert.ok(matchesActionPattern(`${dance}@5422eac04292c961a382e0f584ea0f03ad9da723`, `${dance}@5422eac04292c961a382e0f584ea0f03ad9da723`));
+  assert.ok(!matchesActionPattern(`${dance}@${REVISION}`, `${dance}@5422eac04292c961a382e0f584ea0f03ad9da723`));
+});
+
+test("admits only references the organization allowlist snapshot permits", () => {
+  assert.equal(validateActionAllowlist(`jdx/mise-action@${REVISION}`, ALLOWLIST), null);
+  assert.equal(validateActionAllowlist(`actions/checkout@${REVISION}`, ALLOWLIST), null);
+  assert.equal(validateActionAllowlist(`github/codeql-action/analyze@${REVISION}`, ALLOWLIST), null);
+  assert.equal(validateActionAllowlist(`groovemap-music/automation/.github/workflows/reusable-ci.yml@${REVISION}`, ALLOWLIST), null);
+  assert.equal(validateActionAllowlist(`groovemap-music/.github/.github/workflows/stale.yml@${REVISION}`, ALLOWLIST), null);
+  assert.equal(validateActionAllowlist("./.github/actions/setup-tools", ALLOWLIST), null);
+  assert.equal(validateActionAllowlist(`docker://ghcr.io/example/tool@sha256:${"b".repeat(64)}`, ALLOWLIST), null);
+  assert.match(validateActionAllowlist(`unknown-owner/exfiltrate@${REVISION}`, ALLOWLIST), /not in the organization Actions allowlist/);
+
+  const withoutGithubOwned = { ...ALLOWLIST, github_owned_allowed: false };
+  assert.match(validateActionAllowlist(`actions/checkout@${REVISION}`, withoutGithubOwned), /not in the organization Actions allowlist/);
+});
+
+test("rejects the compiler-cache action that the 2026-09-05 allowlist gap blocked in caller CI", () => {
+  const line = REUSABLE_CI.split("\n").find((candidate) => candidate.includes("uses: mozilla-actions/sccache-action@"));
+  assert.ok(line, "the compiler-cache action reference must be present");
+  assert.equal(validateActionAllowlistLine(line, ALLOWLIST), null);
+
+  const beforeTheFix = {
+    ...ALLOWLIST,
+    patterns_allowed: ALLOWLIST.patterns_allowed.filter((pattern) => !pattern.startsWith("mozilla-actions/")),
+  };
+  assert.match(validateActionAllowlistLine(line, beforeTheFix), /mozilla-actions\/sccache-action@[a-f0-9]{40}/);
+  assert.equal(validateActionAllowlistLine("      - name: Install the Rust compiler cache", beforeTheFix), null);
+});
+
+test("every reusable workflow and composite action reference is allowlisted", () => {
+  const sources = [
+    REUSABLE_CI,
+    REUSABLE_RELEASE,
+    readFileSync(resolve(ROOT, ".github/workflows/ci.yml"), "utf8"),
+    readFileSync(resolve(ROOT, ".github/actions/setup-tools/action.yml"), "utf8"),
+  ];
+  const references = sources.flatMap((source) => source.split("\n")).filter((line) => line.includes("uses:"));
+  assert.ok(references.length > 0, "the workflows must declare action references");
+  for (const line of references) assert.equal(validateActionAllowlistLine(line, ALLOWLIST), null, line.trim());
 });
 
 test("representative Python, Rust, Node, and container calls render complete actor-invariant CI graphs", () => {

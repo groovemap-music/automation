@@ -2,6 +2,8 @@
 
 - Keep `just check` deterministic, credential-free, and free of live service access.
 - Pin every external `uses:` reference to a full 40-character commit revision.
+- Keep `policy/actions-allowlist.json` matching the organization selected-actions response, and
+  widen the live policy before adopting a new action.
 - Document and behavior-test reusable workflow/action interfaces in the same change.
 - Keep fixtures synthetic; never commit secrets, private endpoints, operational data, or private
   planning artifacts.

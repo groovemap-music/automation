@@ -9,13 +9,14 @@ just check
 It performs three deterministic groups of checks:
 
 1. Node and Python syntax checks for the validators and tests.
-2. Standard-library behavior tests for links, exposure rules, action pins, dependency policy,
-   specced Neo4j/PostgreSQL pytest fixtures, rendered Python/Rust/Node/container job contracts,
-   invariant Dependabot behavior, five distinct Graph Explorer browser uploads, and tag-release
-   identity and evidence.
+2. Standard-library behavior tests for links, exposure rules, action pins, organization Actions
+   allowlist matching, dependency policy, specced Neo4j/PostgreSQL pytest fixtures, rendered
+   Python/Rust/Node/container job contracts, invariant Dependabot behavior, five distinct Graph
+   Explorer browser uploads, and tag-release identity and evidence.
 3. Repository validation covering required files, Markdown/local links, MIT and notice metadata,
    Mermaid diagrams, CI permissions, Dependabot ecosystems/labels, immutable action references,
-   reusable interface contracts, tag-only publication, and private-material patterns.
+   organization Actions allowlist membership, reusable interface contracts, tag-only publication,
+   and private-material patterns.
 
 Synthetic fixtures live in `fixtures/contracts`. Validation parses the real reusable workflow
 declarations, applies fixture inputs and defaults, renders active jobs and steps, and derives
@@ -51,6 +52,9 @@ corresponding live labels is a separate infrastructure gate.
 ## Extending validation
 
 When a new dependency manifest or action ecosystem is introduced, add its Dependabot entry and a
-regression fixture in the same change. When a reusable interface is introduced, add its required
-files, documentation links, and behavior checks to the validator. Keep external network checks in
-separately named hosted validation; `just check` remains offline and deterministic.
+regression fixture in the same change. When a new action is adopted, widen the organization
+selected-actions policy first, then record the same pattern in `policy/actions-allowlist.json` in
+the adopting change; the allowlist check reads only that snapshot and never calls GitHub. When a
+reusable interface is introduced, add its required files, documentation links, and behavior checks
+to the validator. Keep external network checks in separately named hosted validation; `just check`
+remains offline and deterministic.

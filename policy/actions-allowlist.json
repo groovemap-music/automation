@@ -18,7 +18,7 @@
     "groovemap-music/automation@*",
     "groovemap-music/automation/.github/workflows/*.yml@*",
     "docker/metadata-action@*",
-    "reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723",
+    "reproducible-containers/buildkit-cache-dance@*",
     "mozilla-actions/sccache-action@*"
   ]
 }

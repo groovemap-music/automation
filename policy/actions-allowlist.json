@@ -1,0 +1,24 @@
+{
+  "github_owned_allowed": true,
+  "verified_allowed": false,
+  "patterns_allowed": [
+    "jdx/mise-action@*",
+    "anchore/sbom-action@*",
+    "docker/login-action@*",
+    "docker/build-push-action@*",
+    "sigstore/cosign-installer@*",
+    "docker/setup-buildx-action@*",
+    "withastro/action@*",
+    "Swatinem/rust-cache@*",
+    "astral-sh/setup-uv@*",
+    "codecov/codecov-action@*",
+    "dtolnay/rust-toolchain@*",
+    "groovemap-music/.github/.github/workflows/*.yml@*",
+    "groovemap-music/.github@*",
+    "groovemap-music/automation@*",
+    "groovemap-music/automation/.github/workflows/*.yml@*",
+    "docker/metadata-action@*",
+    "reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723",
+    "mozilla-actions/sccache-action@*"
+  ]
+}

@@ -77,6 +77,25 @@ validation. Caller commands remain repository-owned and follow the documented
 - `sccache-gha-version` (string, default empty) sets `SCCACHE_GHA_VERSION`, the cache-namespace key.
   Bumping it discards that caller's existing cache entries and touches no other repository.
 
+## Organization Actions allowlist
+
+The organization restricts Actions to a selected set, so a reusable workflow may only call an
+action the organization has admitted. [`policy/actions-allowlist.json`](policy/actions-allowlist.json)
+records the live `orgs/groovemap-music/actions/permissions/selected-actions` response, and
+`just check` fails any `uses:` reference in this repository that is not GitHub-owned (the `actions`
+and `github` owners), not a local `./` or digest-pinned `docker://` reference, and not matched by a
+recorded pattern. The rule exists because on 2026-09-05 `reusable-ci.yml` began calling
+`mozilla-actions/sccache-action` while that pattern was absent from the organization allowlist, so
+every caller repository failed at workflow startup with `is not allowed in groovemap-music/<repo>`
+until the pattern was added on 2026-09-15; the gate now catches that mismatch before the change
+merges. An operator keeps the two in step in a fixed order: the settings owner widens the live
+policy first with `gh api -X PUT orgs/groovemap-music/actions/permissions/selected-actions`, then
+the snapshot is updated here in a reviewed commit, and
+`gh api orgs/groovemap-music/actions/permissions/selected-actions | diff -u policy/actions-allowlist.json -`
+confirms the file still matches. `verified_allowed` is recorded but never admits a reference on its
+own, because creator verification cannot be established offline; a verified creator's action still
+needs its own recorded pattern.
+
 ## Repository boundary
 
 - The public `groovemap-music/automation` repository solely owns reusable workflow and

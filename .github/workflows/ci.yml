@@ -16,11 +16,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Integrity tests inspect immutable preparation ancestors.
       - name: Validate syntax
         run: |
           node --check scripts/validate.mjs
           node --check scripts/validate.test.mjs
       - name: Run behavior tests
-        run: node --test scripts/validate.test.mjs
+        run: |
+          node --test scripts/validate.test.mjs
+          python3 scripts/signed-codecov.test.py
       - name: Validate repository policy
         run: node scripts/validate.mjs

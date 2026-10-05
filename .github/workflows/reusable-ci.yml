@@ -143,6 +143,13 @@ jobs:
     timeout-minutes: 45
     outputs:
       browser-mapping-valid: ${{ steps.interface.outputs.browser-mapping-valid }}
+      codecov-sha: ${{ steps.signed-codecov.outputs.sha }}
+      codecov-branch: ${{ steps.signed-codecov.outputs.branch }}
+      codecov-slug: ${{ steps.signed-codecov.outputs.slug }}
+      codecov-git-service: ${{ steps.signed-codecov.outputs.git-service }}
+      codecov-build: ${{ steps.signed-codecov.outputs.build }}
+      codecov-build-url: ${{ steps.signed-codecov.outputs.build-url }}
+      codecov-pr: ${{ steps.signed-codecov.outputs.pr }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -548,8 +555,34 @@ jobs:
           include-hidden-files: true
           retention-days: 14
 
-      - name: Upload coverage to Codecov
+      - name: Prepare publisher-verified Codecov CLI
+        id: signed-codecov
         if: always() && inputs.upload-codecov && steps.interface.outcome == 'success'
+        env:
+          CODECOV_EVENT_PR: ${{ github.event.pull_request.number || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/signed-codecov.XXXXXXXX")"
+          echo "cleanup-root=${root}" >> "${GITHUB_OUTPUT}"
+          mkdir "${root}/assets" "${root}/environment"
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/prepare.py" -o "${root}/assets/prepare.py"
+          printf "%s  %s\n" "7a5d659e483721c1a8d0de1c250e5cffc46ec4dcf4a557791f109d7eda0a59be" "${root}/assets/prepare.py" | sha256sum --check --status
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/metadata.py" -o "${root}/assets/metadata.py"
+          printf "%s  %s\n" "48d00f449d3f659da6c52036f838c677765b73abe63868259da53bbdf36cb7d5" "${root}/assets/metadata.py" | sha256sum --check --status
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/verifier.lock" -o "${root}/assets/verifier.lock"
+          printf "%s  %s\n" "b514656736e6e2dd0773c47dca6e8d3433f0b2c0e7243df7e332f32851d4f425" "${root}/assets/verifier.lock" | sha256sum --check --status
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/cli-dependencies.lock" -o "${root}/assets/cli-dependencies.lock"
+          printf "%s  %s\n" "aa579662aea91f6c905ceee3c62c1ef1c87a8b955f116a4392a6b86367df1a3a" "${root}/assets/cli-dependencies.lock" | sha256sum --check --status
+          /usr/bin/python3.12 "${root}/assets/prepare.py" prepare "${root}/environment" "${root}/assets" > "${root}/preparation.log" 2>&1 || { cat "${root}/preparation.log"; exit 1; }
+          binary="$(tail -n 1 "${root}/preparation.log")"
+          test "${binary}" = "${root}/environment/cli/bin/codecovcli"
+          test -f "${binary}"
+          echo "binary=${binary}" >> "${GITHUB_OUTPUT}"
+          /usr/bin/python3.12 "${root}/assets/metadata.py"
+
+      - name: Upload coverage to Codecov
+        if: always() && inputs.upload-codecov && steps.interface.outcome == 'success' && steps.signed-codecov.outcome == 'success'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -557,6 +590,36 @@ jobs:
           flags: ${{ inputs.coverage-flags }}
           disable_search: true
           fail_ci_if_error: true
+          binary: ${{ steps.signed-codecov.outputs.binary }}
+          override_commit: ${{ steps.signed-codecov.outputs.sha }}
+          override_branch: ${{ steps.signed-codecov.outputs.branch }}
+          slug: ${{ steps.signed-codecov.outputs.slug }}
+          git_service: ${{ steps.signed-codecov.outputs.git-service }}
+          override_build: ${{ steps.signed-codecov.outputs.build }}
+          override_build_url: ${{ steps.signed-codecov.outputs.build-url }}
+          override_pr: ${{ steps.signed-codecov.outputs.pr }}
+
+      - name: Remove isolated Codecov preparation
+        if: always()
+        shell: bash
+        env:
+          OWNED_CODECOV_ROOT: ${{ steps.signed-codecov.outputs.cleanup-root }}
+        run: |
+          /usr/bin/python3.12 - <<'PY_CLEANUP'
+          import os
+          from pathlib import Path
+          import shutil
+          value = os.environ.get("OWNED_CODECOV_ROOT", "")
+          if value:
+              root = Path(value)
+              parent = Path(os.environ["RUNNER_TEMP"]).resolve()
+              if root.is_symlink() or root.parent.resolve() != parent or not root.name.startswith("signed-codecov."):
+                  raise SystemExit("refusing foreign cleanup path")
+              if root.exists():
+                  if not root.is_dir() or root.stat().st_uid != os.getuid():
+                      raise SystemExit("refusing unowned cleanup path")
+                  shutil.rmtree(root)
+          PY_CLEANUP
 
       - name: Remove private Git credentials
         if: always() && inputs.requires-private-library
@@ -674,7 +737,30 @@ jobs:
               raise SystemExit(f"browser LCOV was not restored at its requested path: {lcov_path}")
           PY
 
+      - name: Prepare publisher-verified Codecov CLI
+        id: signed-codecov
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/signed-codecov.XXXXXXXX")"
+          echo "cleanup-root=${root}" >> "${GITHUB_OUTPUT}"
+          mkdir "${root}/assets" "${root}/environment"
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/prepare.py" -o "${root}/assets/prepare.py"
+          printf "%s  %s\n" "7a5d659e483721c1a8d0de1c250e5cffc46ec4dcf4a557791f109d7eda0a59be" "${root}/assets/prepare.py" | sha256sum --check --status
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/metadata.py" -o "${root}/assets/metadata.py"
+          printf "%s  %s\n" "48d00f449d3f659da6c52036f838c677765b73abe63868259da53bbdf36cb7d5" "${root}/assets/metadata.py" | sha256sum --check --status
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/verifier.lock" -o "${root}/assets/verifier.lock"
+          printf "%s  %s\n" "b514656736e6e2dd0773c47dca6e8d3433f0b2c0e7243df7e332f32851d4f425" "${root}/assets/verifier.lock" | sha256sum --check --status
+          curl --fail --silent --show-error --location --proto "=https" --proto-redir "=https" --max-time 60 --retry 2 "https://raw.githubusercontent.com/groovemap-music/automation/d2506e552a5e34ed81dc9346c960705eb1ea1a5d/scripts/signed-codecov/cli-dependencies.lock" -o "${root}/assets/cli-dependencies.lock"
+          printf "%s  %s\n" "aa579662aea91f6c905ceee3c62c1ef1c87a8b955f116a4392a6b86367df1a3a" "${root}/assets/cli-dependencies.lock" | sha256sum --check --status
+          /usr/bin/python3.12 "${root}/assets/prepare.py" prepare "${root}/environment" "${root}/assets" > "${root}/preparation.log" 2>&1 || { cat "${root}/preparation.log"; exit 1; }
+          binary="$(tail -n 1 "${root}/preparation.log")"
+          test "${binary}" = "${root}/environment/cli/bin/codecovcli"
+          test -f "${binary}"
+          echo "binary=${binary}" >> "${GITHUB_OUTPUT}"
+
       - name: Upload browser coverage to Codecov
+        if: success() && steps.signed-codecov.outcome == 'success'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -682,6 +768,36 @@ jobs:
           flags: e2e-${{ matrix.upload.project }}
           disable_search: true
           fail_ci_if_error: true
+          binary: ${{ steps.signed-codecov.outputs.binary }}
+          override_commit: ${{ needs.validate.outputs.codecov-sha }}
+          override_branch: ${{ needs.validate.outputs.codecov-branch }}
+          slug: ${{ needs.validate.outputs.codecov-slug }}
+          git_service: ${{ needs.validate.outputs.codecov-git-service }}
+          override_build: ${{ needs.validate.outputs.codecov-build }}
+          override_build_url: ${{ needs.validate.outputs.codecov-build-url }}
+          override_pr: ${{ needs.validate.outputs.codecov-pr }}
+
+      - name: Remove isolated Codecov preparation
+        if: always()
+        shell: bash
+        env:
+          OWNED_CODECOV_ROOT: ${{ steps.signed-codecov.outputs.cleanup-root }}
+        run: |
+          /usr/bin/python3.12 - <<'PY_CLEANUP'
+          import os
+          from pathlib import Path
+          import shutil
+          value = os.environ.get("OWNED_CODECOV_ROOT", "")
+          if value:
+              root = Path(value)
+              parent = Path(os.environ["RUNNER_TEMP"]).resolve()
+              if root.is_symlink() or root.parent.resolve() != parent or not root.name.startswith("signed-codecov."):
+                  raise SystemExit("refusing foreign cleanup path")
+              if root.exists():
+                  if not root.is_dir() or root.stat().st_uid != os.getuid():
+                      raise SystemExit("refusing unowned cleanup path")
+                  shutil.rmtree(root)
+          PY_CLEANUP
 
   result:
     name: Required result

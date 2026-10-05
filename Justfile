@@ -17,3 +17,4 @@ check: test
 test:
     node --test scripts/validate.test.mjs
     python3 scripts/validate-database-fixtures.test.py
+    PYTHONPYCACHEPREFIX=.build/pycache python3 scripts/signed-codecov.test.py

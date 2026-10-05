@@ -999,8 +999,8 @@ test("rejects loss of always-run coverage retention and upload", () => {
     "- name: Retain coverage evidence\n        if: success()",
   );
   const withoutUpload = REUSABLE_CI.replace(
-    "if: always() && inputs.upload-codecov && steps.interface.outcome == 'success'",
-    "if: inputs.upload-codecov",
+    "- name: Upload coverage to Codecov\n        if: always() && inputs.upload-codecov && steps.interface.outcome == 'success'",
+    "- name: Upload coverage to Codecov\n        if: inputs.upload-codecov",
   );
   assert.notEqual(withoutRetention, REUSABLE_CI);
   assert.notEqual(withoutUpload, REUSABLE_CI);

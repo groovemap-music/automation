@@ -215,6 +215,35 @@ class WorkflowBootstrapTests(unittest.TestCase):
         self.assertIn("needs.validate.outputs.codecov-sha", sites[1])
         self.assertIn("git", (repo / "scripts/signed-codecov/metadata.py").read_text())
 
+    def test_hosted_checkout_supplies_required_ancestor_history(self):
+        repo = Path(__file__).resolve().parent.parent
+        source_ci = (repo / ".github/workflows/ci.yml").read_text()
+        checkout = source_ci.split("      - name: Check out repository\n", 1)[1].split("      - name:", 1)[0]
+        self.assertRegex(checkout, r"(?m)^          fetch-depth: 0(?: #.*)?$")
+        self.assertNotIn("fetch-depth: 1", checkout)
+        # Reproduce the hosted failure without network; full history restores
+        # the exact ancestor inspection, rather than weakening integrity tests.
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / "source"
+            original.mkdir()
+            def git(*args, cwd=original, check=True):
+                return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check)
+            git("init", "--quiet")
+            (original / "asset").write_text("synthetic immutable asset")
+            git("add", "asset")
+            git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture ancestor")
+            ancestor = git("rev-parse", "HEAD").stdout.strip()
+            (original / "asset").unlink()
+            (original / "current").write_text("synthetic workflow")
+            git("add", "-A")
+            git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture workflow")
+            shallow = Path(tmp) / "shallow"
+            git("clone", "--quiet", "--depth", "1", original.as_uri(), str(shallow))
+            self.assertNotEqual(git("show", f"{ancestor}:asset", cwd=shallow, check=False).returncode, 0)
+            complete = Path(tmp) / "complete"
+            git("clone", "--quiet", original.as_uri(), str(complete))
+            self.assertEqual(git("show", f"{ancestor}:asset", cwd=complete).stdout, "synthetic immutable asset")
+
     def test_tampered_bootstrap_fails_before_helper_execution(self):
         workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/reusable-ci.yml").read_text()
         block = workflow.split("      - name: Prepare publisher-verified Codecov CLI\n", 1)[1].split("      - name: Upload coverage", 1)[0]

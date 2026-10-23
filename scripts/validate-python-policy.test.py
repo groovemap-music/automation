@@ -8,6 +8,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 
@@ -103,6 +104,10 @@ def packages(body: str) -> str:
     return f"[tool.uv.exclude-newer-package]\n{body}\n"
 
 
+def with_packages(body: str) -> str:
+    return render().replace("\n[tool.ruff]", f"\n{packages(body)}\n[tool.ruff]", 1)
+
+
 def check(directory: Path, text: str) -> tuple[list[str], list[str]]:
     path = directory / "pyproject.toml"
     path.write_text(text, encoding="utf-8")
@@ -148,7 +153,7 @@ with tempfile.TemporaryDirectory() as scratch:
         text = render().replace("\n[tool.ruff]", f"\n{packages(f'pillow = {value}')}\n[tool.ruff]", 1)
         errors, warnings = check(directory, text)
         error = only(errors)
-        assert "uv.exclude-newer-package.pillow" in error, (name, error)
+        assert "uv.exclude-newer-package['pillow']" in error, (name, error)
         assert message in error and detail in error, (name, error)
         assert warnings == [], (name, warnings)
 
@@ -158,11 +163,52 @@ with tempfile.TemporaryDirectory() as scratch:
     # An exception older than the window warns, naming the package, and never fails.
     boundary = (NOW - policy.EXCLUDE_NEWER_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
     older = (NOW - policy.EXCLUDE_NEWER_WINDOW - datetime.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    body = packages(f'edge = "{boundary}"\nstale = "{older}"\nfuture = "2027-01-01T00:00:00Z"')
+    body = packages(f'edge = "{boundary}"\nstale = "{older}"')
     errors, warnings = check(directory, render().replace("\n[tool.ruff]", f"\n{body}\n[tool.ruff]", 1))
     assert errors == [], errors
     warning = only(warnings)
-    assert "uv.exclude-newer-package.stale" in warning and older in warning and "older than 7 days" in warning, warning
+    assert "uv.exclude-newer-package['stale']" in warning and older in warning and "older than 7 days" in warning, warning
+
+    # An exception must name an already-published release: a timestamp equal to now passes, any later one fails.
+    stamp = "%Y-%m-%dT%H:%M:%SZ"
+    present = NOW.strftime(stamp)
+    errors, warnings = check(directory, with_packages(f'now = "{present}"'))
+    assert errors == [] and warnings == [], (errors, warnings)
+    for name, future in {
+        "one second": NOW + datetime.timedelta(seconds=1),
+        "months": datetime.datetime(2027, 1, 1, tzinfo=datetime.UTC),
+    }.items():
+        errors, warnings = check(directory, with_packages(f'soon = "{future.strftime(stamp)}"'))
+        error = only(errors)
+        assert "uv.exclude-newer-package['soon']" in error and future.strftime(stamp) in error, (name, error)
+        assert "in the future" in error and "already been published" in error, (name, error)
+        assert warnings == [], (name, warnings)
+
+    # Only valid PEP 508 / PEP 503 names are accepted, in any case and with ._- separators.
+    good = packages('Foo_Bar = "2026-10-20T00:00:00Z"\n"a.b-c" = "2026-10-20T00:00:00Z"\nx = "2026-10-20T00:00:00Z"')
+    errors, warnings = check(directory, render().replace("\n[tool.ruff]", f"\n{good}\n[tool.ruff]", 1))
+    assert errors == [] and warnings == [], (errors, warnings)
+
+    hostile_names = {
+        "newline": "pillow\\n::error::injected",
+        "colons": "pil::low",
+        "comma": "a,b",
+        "space": "a b",
+        "empty": "",
+        "leading separator": "-pillow",
+        "trailing separator": "pillow.",
+        "percent": "a%0Ab",
+        "carriage return": "a\\rb",
+        "non-ascii": "p\\u00efllow",
+    }
+    for name, key in hostile_names.items():
+        text = with_packages(f'"{key}" = "2026-10-20T00:00:00Z"')
+        errors, warnings = check(directory, text)
+        error = only(errors)
+        assert "is not a valid PEP 508 package name" in error, (name, error)
+        assert "\n" not in error and "\r" not in error, (name, error)
+        assert warnings == [], (name, warnings)
+        assert repr(tomllib.loads(text)["tool"]["uv"]["exclude-newer-package"].popitem()[0]) in error, (name, error)
 
     # The command line emits a GitHub annotation relative to the repository root and still succeeds.
     stale = packages('stale = "2000-01-01T00:00:00Z"')
@@ -171,14 +217,66 @@ with tempfile.TemporaryDirectory() as scratch:
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     assert "::warning file=pyproject.toml::" in result.stdout
-    assert "uv.exclude-newer-package.stale (2000-01-01T00:00:00Z)" in result.stdout
+    assert "uv.exclude-newer-package['stale'] (2000-01-01T00:00:00Z)" in result.stdout
     assert str(directory) not in result.stdout
     assert "Validated shared Python policy in 1 pyproject.toml file(s)." in result.stdout
 
     (directory / "pyproject.toml").write_text(render().replace("\n[tool.ruff]", f"\n{packages('pillow = false')}\n[tool.ruff]", 1), encoding="utf-8")
     result = subprocess.run(["python3", str(VALIDATOR), str(directory)], check=False, capture_output=True, text=True)
     assert result.returncode == 1, result.stdout
-    assert "ERROR" in result.stderr and "uv.exclude-newer-package.pillow must not be false" in result.stderr
+    assert "ERROR" in result.stderr and "uv.exclude-newer-package['pillow'] must not be false" in result.stderr
+
+# Workflow commands are parsed from the start of a line, so no hostile text may add a line or reach column zero.
+def unescape(value: str) -> str:
+    for encoded, decoded in (("%3A", ":"), ("%2C", ","), ("%0D", "\r"), ("%0A", "\n"), ("%25", "%")):
+        value = value.replace(encoded, decoded)
+    return value
+
+
+hostile = "x%0A\r\n::error::injected\n::set-output name=a::b%"
+line = policy.annotation("warning", hostile, file=f"dir,with:delims\n::error::{hostile}.toml")
+assert len(line.splitlines()) == 1 and "\r" not in line and "\n" not in line, line
+assert line.startswith("::warning file="), line
+head, _, data = line[len("::warning file=") :].partition("::")
+assert ":" not in head and "," not in head and "\r" not in head, head
+assert unescape(data) == hostile, data
+assert unescape(head) == f"dir,with:delims\n::error::{hostile}.toml", head
+assert policy.annotation("error", "plain") == "::error::plain"
+assert policy.error_line("bad\n::error::x\r") == "ERROR bad%0A::error::x%0D"
+assert policy.escape_data("100%\r\n") == "100%25%0D%0A"
+assert policy.escape_property("a:b,c%d\n") == "a%3Ab%2Cc%25d%0A"
+
+with tempfile.TemporaryDirectory() as scratch:
+    directory = Path(scratch)
+
+    def run_cli(text: str, sub: str = "") -> subprocess.CompletedProcess[str]:
+        target = directory / sub
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "pyproject.toml").write_text(text, encoding="utf-8")
+        return subprocess.run(["python3", str(VALIDATOR), str(directory)], check=False, capture_output=True, text=True)
+
+    def assert_no_injected_command(output: str, allowed: str) -> None:
+        for output_line in output.splitlines():
+            assert output_line.startswith(allowed) or not output_line.startswith("::"), repr(output_line)
+
+    # A hostile package name fails validation and cannot start a new workflow-command line on stdout or stderr.
+    attack = '"pillow\\n::error title=pwned::injected\\r::warning::x"'
+    result = run_cli(with_packages(f'{attack} = "2026-10-20T00:00:00Z"'))
+    assert result.returncode == 1, result.stdout
+    assert "is not a valid PEP 508 package name" in result.stderr and "injected" in result.stderr
+    assert len(result.stderr.splitlines()) == 1 and result.stderr.startswith("ERROR "), repr(result.stderr)
+    assert result.stdout == "", result.stdout
+    (directory / "pyproject.toml").unlink()
+
+    # A hostile directory name reaches the warning's file property escaped, on a single line.
+    nasty = "pkg,a:b\n::error::pwned"
+    stale = packages('stale = "2000-01-01T00:00:00Z"')
+    result = run_cli(render().replace("\n[tool.ruff]", f"\n{stale}\n[tool.ruff]", 1), nasty)
+    assert result.returncode == 0, result.stderr
+    assert_no_injected_command(result.stdout, "::warning file=")
+    warning_lines = [output_line for output_line in result.stdout.splitlines() if output_line.startswith("::warning")]
+    assert len(warning_lines) == 1, result.stdout
+    assert warning_lines[0].startswith("::warning file=pkg%2Ca%3Ab%0A%3A%3Aerror%3A%3Apwned/pyproject.toml::"), warning_lines[0]
 
 assert "validate.py" in ACTION.read_text(encoding="utf-8")
 print("Validated shared Python policy checker contract.")

@@ -92,12 +92,35 @@ COMMITIZEN_POLICY = {
 
 EXCLUDE_NEWER = "7 days"
 EXCLUDE_NEWER_WINDOW = datetime.timedelta(days=7)
-UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-LOCAL_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-DURATION = re.compile(r"^(?:P(?=\d|T)[\dYMWDTHS.,]+|\d+\s*[A-Za-z]+(?:\s+\d+\s*[A-Za-z]+)*)$")
+UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+LOCAL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DURATION = re.compile(r"P(?=\d|T)[\dYMWDTHS.,]+|\d+\s*[A-Za-z]+(?:\s+\d+\s*[A-Za-z]+)*")
+# PEP 508 name grammar; PEP 503 normalization only folds case and runs of ._- so it adds no characters.
+PACKAGE_NAME = re.compile(r"[A-Z0-9](?:[A-Z0-9._-]*[A-Z0-9])?", re.IGNORECASE)
 
 IGNORED_DIRECTORIES = {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "node_modules", "target"}
 HEADER = re.compile(r"^\[([^[][^]]*)\]$")
+
+
+def escape_data(value: str) -> str:
+    """Escape annotation data as GitHub's workflow-command parser expects, so it cannot end the line."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def escape_property(value: str) -> str:
+    """Escape an annotation property value; properties also reserve the `:` and `,` delimiters."""
+    return escape_data(value).replace(":", "%3A").replace(",", "%2C")
+
+
+def annotation(level: str, message: str, file: str | None = None) -> str:
+    """Build the only workflow-command line this script emits; every caller-supplied byte is escaped."""
+    properties = f" file={escape_property(file)}" if file is not None else ""
+    return f"::{level}{properties}::{escape_data(message)}"
+
+
+def error_line(message: str) -> str:
+    """Format a stderr error; the runner scans stderr for commands too, so it is escaped the same way."""
+    return f"ERROR {escape_data(message)}"
 
 
 def nested(document: dict[str, Any], *keys: str) -> Any:
@@ -142,14 +165,16 @@ def exclude_newer_package_findings(path: Path, table: Any, now: datetime.datetim
     warnings: list[str] = []
     guidance = "an exception admits one fixed release as an RFC 3339 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)"
     for package, value in table.items():
-        label = f"uv.exclude-newer-package.{package}"
-        if isinstance(value, bool):
+        label = f"uv.exclude-newer-package[{package!r}]"
+        if not PACKAGE_NAME.fullmatch(package):
+            errors.append(f"{path}: uv.exclude-newer-package key {package!r} is not a valid PEP 508 package name")
+        elif isinstance(value, bool):
             errors.append(f"{path}: {label} must not be {str(value).lower()}; {guidance}, it does not opt a package out of the window")
-        elif isinstance(value, datetime.date) or (isinstance(value, str) and LOCAL_DATE.match(value)):
+        elif isinstance(value, datetime.date) or (isinstance(value, str) and LOCAL_DATE.fullmatch(value)):
             errors.append(f"{path}: {label} must not be a local date ({value}); {guidance}")
-        elif isinstance(value, str) and DURATION.match(value):
+        elif isinstance(value, str) and DURATION.fullmatch(value):
             errors.append(f"{path}: {label} must not be a duration ({value!r}); {guidance}, the global window is already {EXCLUDE_NEWER!r}")
-        elif not isinstance(value, str) or not UTC_TIMESTAMP.match(value):
+        elif not isinstance(value, str) or not UTC_TIMESTAMP.fullmatch(value):
             errors.append(f"{path}: {label} must be an RFC 3339 UTC timestamp string (YYYY-MM-DDTHH:MM:SSZ); found {value!r}")
         else:
             try:
@@ -157,7 +182,12 @@ def exclude_newer_package_findings(path: Path, table: Any, now: datetime.datetim
             except ValueError:
                 errors.append(f"{path}: {label} is not a valid calendar timestamp; found {value!r}")
                 continue
-            if now - admitted > EXCLUDE_NEWER_WINDOW:
+            if admitted > now:
+                errors.append(
+                    f"{path}: {label} ({value}) is in the future; an exception admits a release that has already been published, "
+                    "so use the timestamp of that release"
+                )
+            elif now - admitted > EXCLUDE_NEWER_WINDOW:
                 warnings.append(
                     f"{label} ({value}) is older than {EXCLUDE_NEWER}; the global window now covers it and keeping it freezes the package, remove it"
                 )
@@ -267,10 +297,10 @@ def main() -> int:
         path_errors, path_warnings = validate_pyproject(path)
         errors.extend(path_errors)
         for warning in path_warnings:
-            print(f"::warning file={path.relative_to(root).as_posix()}::{warning}")
+            print(annotation("warning", warning, file=path.relative_to(root).as_posix()))
     if errors:
         for error in errors:
-            print(f"ERROR {error}", file=sys.stderr)
+            print(error_line(error), file=sys.stderr)
         return 1
 
     print(f"Validated shared Python policy in {len(paths)} pyproject.toml file(s).")

@@ -54,6 +54,7 @@ const REQUIRED_FILES = [
   "fixtures/database-fixtures/valid/tests/conftest.py",
   "policy/actions-allowlist.json",
   "scripts/validate-database-fixtures.test.py",
+  "scripts/validate-python-policy.test.py",
   "scripts/validate.mjs",
   "scripts/validate.test.mjs",
   "scripts/workflow-contract.mjs",

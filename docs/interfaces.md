@@ -244,6 +244,22 @@ toolchain using the pinned mise action and its cache. `.github/actions/validate-
 has no inputs or outputs and applies GrooveMap's shared Python configuration policy with Python
 standard-library code.
 
+The policy requires `[tool.uv] exclude-newer = "7 days"`. A repository may add
+`[tool.uv.exclude-newer-package]` to admit one fixed release of a package that the window would
+otherwise hold back. Every value must be an RFC 3339 UTC timestamp string in the form
+`YYYY-MM-DDTHH:MM:SSZ`:
+
+```toml
+[tool.uv.exclude-newer-package]
+example-package = "2026-10-20T00:00:00Z"
+```
+
+The validator fails `false`, durations such as `"3 days"`, local dates such as `"2026-10-20"`, and
+any other value, because an exception names a release and does not opt a package out of the
+window. An exception more than 7 days old is stale: the global window now covers it and keeping it
+freezes the package. It produces a `::warning file=pyproject.toml::` annotation rather than a
+failure, so unrelated CI does not break on a date. Remove the entry when the annotation appears.
+
 `.github/actions/validate-database-fixtures` scans the caller's `tests` directory by default and
 rejects unspecced `Mock`, `MagicMock`, and `AsyncMock` construction inside pytest fixtures whose
 source identifies a Neo4j, psycopg, or PostgreSQL boundary. The optional `paths` input is a

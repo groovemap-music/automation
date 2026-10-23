@@ -256,9 +256,21 @@ example-package = "2026-10-20T00:00:00Z"
 
 The validator fails `false`, durations such as `"3 days"`, local dates such as `"2026-10-20"`, and
 any other value, because an exception names a release and does not opt a package out of the
-window. An exception more than 7 days old is stale: the global window now covers it and keeping it
-freezes the package. It produces a `::warning file=pyproject.toml::` annotation rather than a
-failure, so unrelated CI does not break on a date. Remove the entry when the annotation appears.
+window. Each key must be a valid PEP 508 package name (PEP 503 normalization only folds case and
+runs of `.`, `_`, and `-`); a key with a newline, `::`, a comma, whitespace, or a leading or
+trailing separator fails, and messages quote package names with `repr()`.
+
+A timestamp later than the time of the run fails, because an exception admits a release that has
+already been published; a timestamp equal to the time of the run passes. An exception more than 7
+days old is stale: the global window now covers it and keeping it freezes the package. It produces a
+`::warning file=pyproject.toml::` annotation rather than a failure, so unrelated CI does not break
+on a date. Remove the entry when the annotation appears.
+
+Every annotation is built by one helper that escapes the text before it reaches the runner's
+workflow-command parser. In the message, `%` becomes `%25`, carriage return `%0D`, and line feed
+`%0A`. In a property such as `file=`, `:` becomes `%3A` and `,` becomes `%2C` as well. Error lines
+on standard error pass through the same message escaping, so no package name, path, or value can
+start a new workflow-command line.
 
 `.github/actions/validate-database-fixtures` scans the caller's `tests` directory by default and
 rejects unspecced `Mock`, `MagicMock`, and `AsyncMock` construction inside pytest fixtures whose

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 import sys
 import tomllib
@@ -89,6 +90,12 @@ COMMITIZEN_POLICY = {
     "changelog_file": "CHANGELOG.md",
 }
 
+EXCLUDE_NEWER = "7 days"
+EXCLUDE_NEWER_WINDOW = datetime.timedelta(days=7)
+UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+LOCAL_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DURATION = re.compile(r"^(?:P(?=\d|T)[\dYMWDTHS.,]+|\d+\s*[A-Za-z]+(?:\s+\d+\s*[A-Za-z]+)*)$")
+
 IGNORED_DIRECTORIES = {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "node_modules", "target"}
 HEADER = re.compile(r"^\[([^[][^]]*)\]$")
 
@@ -126,13 +133,47 @@ def check_equal(errors: list[str], path: Path, label: str, actual: Any, expected
         errors.append(f"{path}: {label} must be {expected!r}; found {actual!r}")
 
 
-def validate_pyproject(path: Path) -> list[str]:
+def exclude_newer_package_findings(path: Path, table: Any, now: datetime.datetime) -> tuple[list[str], list[str]]:
+    """Validate per-package exceptions; each admits one fixed release rather than opting a package out."""
+    if not isinstance(table, dict):
+        return [f"{path}: uv.exclude-newer-package must be a table of package timestamps; found {table!r}"], []
+
     errors: list[str] = []
+    warnings: list[str] = []
+    guidance = "an exception admits one fixed release as an RFC 3339 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)"
+    for package, value in table.items():
+        label = f"uv.exclude-newer-package.{package}"
+        if isinstance(value, bool):
+            errors.append(f"{path}: {label} must not be {str(value).lower()}; {guidance}, it does not opt a package out of the window")
+        elif isinstance(value, datetime.date) or (isinstance(value, str) and LOCAL_DATE.match(value)):
+            errors.append(f"{path}: {label} must not be a local date ({value}); {guidance}")
+        elif isinstance(value, str) and DURATION.match(value):
+            errors.append(f"{path}: {label} must not be a duration ({value!r}); {guidance}, the global window is already {EXCLUDE_NEWER!r}")
+        elif not isinstance(value, str) or not UTC_TIMESTAMP.match(value):
+            errors.append(f"{path}: {label} must be an RFC 3339 UTC timestamp string (YYYY-MM-DDTHH:MM:SSZ); found {value!r}")
+        else:
+            try:
+                admitted = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.UTC)
+            except ValueError:
+                errors.append(f"{path}: {label} is not a valid calendar timestamp; found {value!r}")
+                continue
+            if now - admitted > EXCLUDE_NEWER_WINDOW:
+                warnings.append(
+                    f"{label} ({value}) is older than {EXCLUDE_NEWER}; the global window now covers it and keeping it freezes the package, remove it"
+                )
+    return errors, warnings
+
+
+def validate_pyproject(path: Path, now: datetime.datetime | None = None) -> tuple[list[str], list[str]]:
+    """Return (errors, warnings); `now` is injectable so the stale-exception check is deterministic."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    now = now or datetime.datetime.now(datetime.UTC)
     text = path.read_text(encoding="utf-8")
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        return [f"{path}: invalid TOML: {error}"]
+        return [f"{path}: invalid TOML: {error}"], []
 
     families = physical_families(text)
     check_equal(errors, path, "section-family order", families, EXPECTED_FAMILY_ORDER)
@@ -150,7 +191,12 @@ def validate_pyproject(path: Path) -> list[str]:
             errors.append(f"{path}: development dependencies missing {missing_development!r}")
 
         nested(document, "tool", "hatch", "build", "targets", "wheel")
-        check_equal(errors, path, "uv.exclude-newer", nested(document, "tool", "uv", "exclude-newer"), "2 days")
+        check_equal(errors, path, "uv.exclude-newer", nested(document, "tool", "uv", "exclude-newer"), EXCLUDE_NEWER)
+        uv = nested(document, "tool", "uv")
+        if "exclude-newer-package" in uv:
+            package_errors, package_warnings = exclude_newer_package_findings(path, uv["exclude-newer-package"], now)
+            errors.extend(package_errors)
+            warnings.extend(package_warnings)
 
         ruff = nested(document, "tool", "ruff")
         check_equal(errors, path, "ruff.line-length", ruff.get("line-length"), 150)
@@ -198,7 +244,7 @@ def validate_pyproject(path: Path) -> list[str]:
     except KeyError as error:
         errors.append(f"{path}: required configuration table or key is missing: {error.args[0]}")
 
-    return errors
+    return errors, warnings
 
 
 def discover(root: Path) -> list[Path]:
@@ -216,7 +262,12 @@ def main() -> int:
         print("No pyproject.toml files found; shared Python policy not applicable.")
         return 0
 
-    errors = [error for path in paths for error in validate_pyproject(path)]
+    errors: list[str] = []
+    for path in paths:
+        path_errors, path_warnings = validate_pyproject(path)
+        errors.extend(path_errors)
+        for warning in path_warnings:
+            print(f"::warning file={path.relative_to(root).as_posix()}::{warning}")
     if errors:
         for error in errors:
             print(f"ERROR {error}", file=sys.stderr)

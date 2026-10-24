@@ -26,5 +26,8 @@ jobs:
         run: |
           node --test scripts/validate.test.mjs
           python3 scripts/signed-codecov.test.py
+          python3 scripts/publication-hygiene.test.py
       - name: Validate repository policy
         run: node scripts/validate.mjs
+      - name: Reject committed bytecode and local home paths
+        run: python3 scripts/publication-hygiene.py --history

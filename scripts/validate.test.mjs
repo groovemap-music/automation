@@ -1016,6 +1016,25 @@ test("rejects loss of always-run coverage retention and upload", () => {
   );
 });
 
+test("requires the publication-hygiene step for every caller with an event-derived range", () => {
+  const step = "Reject committed bytecode and local home paths";
+  const conditional = REUSABLE_CI.replace(`- name: ${step}\n        shell: bash`, `- name: ${step}\n        if: inputs.language == 'python'\n        shell: bash`);
+  const noRange = REUSABLE_CI.replace("github.event.pull_request.base.sha", "github.event.pull_request.number");
+  const removed = REUSABLE_CI.replace(`- name: ${step}`, "- name: Renamed step");
+  for (const [source, expected] of [
+    [conditional, "without a condition"],
+    [noRange, "github.event.pull_request.base.sha"],
+    [removed, "required contract marker is missing"],
+  ]) {
+    assert.notEqual(source, REUSABLE_CI);
+    assert.ok(workflowContractIssues(".github/workflows/reusable-ci.yml", source).some((issue) => issue.includes(expected)), expected);
+  }
+  assert.deepEqual(
+    workflowContractIssues(".github/workflows/reusable-ci.yml", REUSABLE_CI).filter((issue) => issue.includes(step)),
+    [],
+  );
+});
+
 test("rejects Codecov uploads that can discover reports beyond their validated explicit file list", () => {
   const genericSearchEnabled = REUSABLE_CI.replace(
     "files: ${{ steps.interface.outputs.codecov-files }}\n          flags: ${{ inputs.coverage-flags }}\n          disable_search: true",

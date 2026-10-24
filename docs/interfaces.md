@@ -8,8 +8,8 @@ the selected workflow or action to a reviewed forty-character commit SHA.
 
 `.github/workflows/reusable-ci.yml` exposes one `validate` job and one aggregate `result` job. The
 graph never branches on the actor or event type, so a Dependabot pull request runs the same format,
-lint, type, test, coverage, contract, dependency-audit, license, secret-scan, package, install,
-integration, and container commands as an ordinary pull request. Optional integration and image
+lint, type, test, coverage, contract, dependency-audit, license, secret-scan, publication-hygiene,
+package, install, integration, and container commands as an ordinary pull request. Optional integration and image
 steps are repository capabilities, not actor-specific fallbacks.
 
 The manifest's complete optional input set is `runner` (`ubuntu-24.04`),
@@ -100,6 +100,59 @@ isolated: callers must write each project's failure evidence only beneath that p
 paths and must not clear an earlier project's paths when starting the next project. An empty JSON
 array, malformed project, newline, glob, or former multi-flag shape fails before upload. Omitting the
 input remains supported for non-browser callers.
+
+### Publication hygiene
+
+The `Reject committed bytecode and local home paths` step runs in `validate` for every caller,
+immediately after the secret scan, with no input, no condition and no network access. It exists
+because CPython bytecode embeds the absolute path of the source file it was compiled from, which is
+usually a developer's home directory, and neither a secret scanner nor a linter reads compiled
+binaries for that. The check fails on:
+
+- `bytecode`: a tracked `.pyc` or `.pyo` file, or any tracked path inside `__pycache__/`;
+- `home-path-macos`, `home-path-linux`, `home-path-windows`: any tracked blob, text or binary,
+  that contains an absolute user-home path, that is a `Users` or `home` directory at the root of
+  the filesystem or of a drive letter, followed by a user name and a separator. Placeholders such as
+  `/home/<name>/` or `$HOME`, and relative paths such as `docs/home/guide/`, do not match in text
+  files; a binary matches anywhere because compiled formats embed paths after a length byte.
+
+It scans every tracked file in the checked-out worktree, and every blob that each commit in the
+validated range adds or changes (against the commit's first parent; a root commit adds everything).
+A file added and later deleted inside the range therefore still fails. Output names the class, the
+location (`worktree` or a twelve-character commit) and the repository path, with control characters
+escaped. It never prints the matched text, so the log cannot republish what it caught.
+
+The validated range follows the event:
+
+| Event | Range |
+| --- | --- |
+| `push` | `github.event.before` to `github.event.after` |
+| `pull_request` | `pull_request.base.sha` to `pull_request.head.sha` |
+| `merge_group` | `merge_group.base_sha` to `merge_group.head_sha` |
+| any other event | every commit reachable from the checked-out `HEAD` |
+
+A range that has no usable start is widened, never narrowed. When `before` is all zeros (a new
+branch or the first push) or empty, or the base commit is not in the clone (for example after a
+force push), the check scans every commit reachable from the head and says so in its summary. The
+job already checks out full history; a shallow clone fails with exit status 2 instead of passing on
+partial evidence. `--history` forces the full scan for any caller or local run:
+
+```bash
+python3 scripts/publication-hygiene.py --repo <path> --history
+```
+
+Exit status is 0 when clean, 1 for findings and 2 when the check could not run.
+
+A caller may keep a reviewed allowlist at `.publication-hygiene-allowlist` in its repository root:
+one exact repository-relative path per line, `#` comment lines allowed, no globs, no absolute or
+parent-traversing paths. A listed path is skipped in the worktree and in every scanned commit. The
+file is empty by default. Put it under `CODEOWNERS` review, because a pull request that edits it
+also changes what its own check accepts.
+
+The script lives in `scripts/publication-hygiene.py` and is embedded verbatim in the workflow step,
+because a reusable workflow cannot fetch its own revision and must not reference a mutable ref. A
+behavior test fails when the two copies differ; re-embed the script with a ten-space indent after
+changing it. The check reads the repository history only and never changes it.
 
 Private Python-library access requires all three explicit inputs: `requires-private-library: true`,
 `private-library-client-id`, and an immutable `private-library-revision`, plus the

@@ -1,0 +1,4 @@
+# Reviewed exemptions for the publication-hygiene check (scripts/publication-hygiene.py).
+# One exact repository-relative path per line; no globs. Blank lines and lines starting with # are
+# ignored. A listed path is skipped in the worktree and in every scanned commit, so each entry
+# needs a reviewer and a reason in the commit that adds it. This file is empty by default.

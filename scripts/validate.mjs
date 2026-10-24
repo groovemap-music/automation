@@ -30,6 +30,7 @@ const REQUIRED_FILES = [
   ".github/workflows/reusable-release.yml",
   ".gitignore",
   ".mise.toml",
+  ".publication-hygiene-allowlist",
   "AGENTS.md",
   "CONTRIBUTING.md",
   "Justfile",
@@ -53,12 +54,15 @@ const REQUIRED_FILES = [
   "fixtures/database-fixtures/invalid/tests/conftest.py",
   "fixtures/database-fixtures/valid/tests/conftest.py",
   "policy/actions-allowlist.json",
+  "scripts/publication-hygiene.py",
+  "scripts/publication-hygiene.test.py",
   "scripts/validate-database-fixtures.test.py",
   "scripts/validate-python-policy.test.py",
   "scripts/validate.mjs",
   "scripts/validate.test.mjs",
   "scripts/workflow-contract.mjs",
 ];
+const HYGIENE_STEP = "Reject committed bytecode and local home paths";
 const RUST_COMPILER_CACHE_MODES = ["auto", "on", "off"];
 const RUST_COMPILER_CACHE_CONDITION =
   "(inputs.language == 'rust' && inputs.rust-compiler-cache != 'off')"
@@ -294,6 +298,7 @@ export function workflowContractIssues(path, content) {
       "Run dependency audit",
       "Validate locked dependency licenses",
       "Scan repository and history for secrets",
+      HYGIENE_STEP,
       "Build package or application artifact",
       "Install and smoke-test built artifact",
       "Stage workspace-relative coverage evidence",
@@ -327,6 +332,16 @@ export function workflowContractIssues(path, content) {
       `${RUST_COMPILER_CACHE_MODES.join("|")}) ;;`,
       "RUST_COMPILER_CACHE: ${{ inputs.rust-compiler-cache }}",
       "default: auto",
+    ]);
+    if (/^        if:/m.test(stepBlock(content, HYGIENE_STEP))) {
+      errors.push(`${path}: ${HYGIENE_STEP} must run for every caller without a condition`);
+    }
+    requireStepMarkers(errors, path, content, HYGIENE_STEP, [
+      "github.event.before",
+      "github.event.after",
+      "github.event.pull_request.base.sha",
+      "github.event.pull_request.head.sha",
+      "hygiene_range=(--history)",
     ]);
     const codecovUploads = [...content.matchAll(/^\s+uses:\s+codecov\/codecov-action@/gm)];
     if (codecovUploads.length !== 2) {

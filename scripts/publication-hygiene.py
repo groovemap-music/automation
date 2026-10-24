@@ -20,8 +20,12 @@ BINARY_PROBE = 8192
 # repository exposure rules scan every tracked file, this one included.
 _MAC_HOME = b"/" + b"Us" + b"ers"
 _LINUX_HOME = b"/" + b"ho" + b"me"
-_NAME = rb"(?!\.+[\\/])[^\x00-\x20\\/<>:\"'|?*$%{}()\[\]~`]+"
-_WINDOWS_NAME = rb"(?!\.+[\\/])[^\x00-\x1f\\/<>:\"'|?*$%{}()\[\]~`]+"
+# Generic or placeholder account names that identify no one. The list is closed: an exempt name must be
+# the whole path segment and match case-sensitively, so a longer or differently cased name still fails.
+GENERIC_ACCOUNTS = ("runner", "Shared", "user", "username", "you", "yourname", "name", "me", "example")
+_GENERIC = rb"(?!(?-i:(?:" + b"|".join(name.encode() for name in GENERIC_ACCOUNTS) + rb")[\\/]))"
+_NAME = _GENERIC + rb"(?!\.+[\\/])[^\x00-\x20\\/<>:\"'|?*$%{}()\[\]~`]+"
+_WINDOWS_NAME = _GENERIC + rb"(?!\.+[\\/])[^\x00-\x1f\\/<>:\"'|?*$%{}()\[\]~`]+"
 _SEPARATOR = rb"[\\/]{1,4}"
 # Text files only match at a path start, so a relative path such as docs/<dir>/<page>/ is not a home
 # path. Binary files embed paths after a length byte, so they match anywhere.

@@ -115,6 +115,12 @@ binaries for that. The check fails on:
   the filesystem or of a drive letter, followed by a user name and a separator. Placeholders such as
   `/home/<name>/` or `$HOME`, and relative paths such as `docs/home/guide/`, do not match in text
   files; a binary matches anywhere because compiled formats embed paths after a length byte.
+  Generic and placeholder accounts that identify no one are exempt from all three classes in text
+  and binary blobs alike: `runner`, `Shared`, `user`, `username`, `you`, `yourname`, `name`, `me`
+  and `example`. The list is closed, and a name is exempt only as the whole path segment and only
+  with exactly this case, so `username2`, `users`, `Runner` and `example.com` still fail. This is
+  a rule about the account name, not about a file, so a real leak added next to a placeholder
+  is still caught.
 
 It scans every tracked file in the checked-out worktree, and every blob that each commit in the
 validated range adds or changes (against the commit's first parent; a root commit adds everything).

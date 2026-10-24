@@ -104,6 +104,39 @@ class ClassificationTests(unittest.TestCase):
             with self.subTest(sample=sample):
                 self.assertEqual(hygiene.classify_content(sample.encode()), [])
 
+    def test_generic_and_placeholder_account_names_are_exempt(self):
+        self.assertEqual(
+            hygiene.GENERIC_ACCOUNTS, ("runner", "Shared", "user", "username", "you", "yourname", "name", "me", "example")
+        )
+        for account in hygiene.GENERIC_ACCOUNTS:
+            for path in (
+                f"/{'Us' + 'ers'}/{account}/project/x.py",
+                f"/{'ho' + 'me'}/{account}/project/x.py",
+                f"C:\\{'Us' + 'ers'}\\{account}\\project\\x.py",
+                f"C:/{'Us' + 'ers'}/{account}/project/x.py",
+                f"C:\\\\{'Us' + 'ers'}\\\\{account}\\\\x",
+            ):
+                for data in (f"see {path}\n".encode(), b"\x00\x01z\x41" + path.encode() + b"\x00"):
+                    with self.subTest(path=path, binary=b"\0" in data):
+                        self.assertEqual(hygiene.classify_content(data), [])
+
+    def test_near_misses_of_generic_names_still_fail(self):
+        for account in (
+            "username2", "user1", "users", "runners", "Runner", "SHARED", "shared", "You", "names", "memo", "example.com",
+            "my-user", "user.name", "username-", "e", "us",
+        ):
+            for prefix, label in (("/" + "Us" + "ers", "home-path-macos"), ("/" + "ho" + "me", "home-path-linux")):
+                for data in (f"{prefix}/{account}/x\n".encode(), b"\x00z\x10" + f"{prefix}/{account}/x".encode()):
+                    with self.subTest(account=account, prefix=prefix, binary=b"\0" in data):
+                        self.assertEqual(hygiene.classify_content(data), [label])
+            with self.subTest(account=account, windows=True):
+                data = f"C:\\{'Us' + 'ers'}\\{account}\\x".encode()
+                self.assertEqual(hygiene.classify_content(data), ["home-path-windows"])
+
+    def test_a_generic_name_does_not_hide_a_real_path_on_the_same_line(self):
+        data = f"{'/' + 'Us' + 'ers'}/user/a and {MAC_PATH}\n".encode()
+        self.assertEqual(hygiene.classify_content(data), ["home-path-macos"])
+
     def test_bytecode_paths(self):
         for path in ("a.pyc", "pkg/a.cpython-313.PYC", "pkg/a.pyo", "pkg/__pycache__/a.txt", "__pycache__/x"):
             with self.subTest(path=path):

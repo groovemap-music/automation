@@ -1021,7 +1021,9 @@ test("requires the publication-hygiene step for every caller with an event-deriv
   const conditional = REUSABLE_CI.replace(`- name: ${step}\n        shell: bash`, `- name: ${step}\n        if: inputs.language == 'python'\n        shell: bash`);
   const noRange = REUSABLE_CI.replace("github.event.pull_request.base.sha", "github.event.pull_request.number");
   const removed = REUSABLE_CI.replace(`- name: ${step}`, "- name: Renamed step");
+  const fullHistory = REUSABLE_CI.replace("*) hygiene_range=() ;;", "*) hygiene_range=(--history) ;;");
   for (const [source, expected] of [
+    [fullHistory, "without a commit range"],
     [conditional, "without a condition"],
     [noRange, "github.event.pull_request.base.sha"],
     [removed, "required contract marker is missing"],

@@ -128,20 +128,29 @@ A file added and later deleted inside the range therefore still fails. Output na
 location (`worktree` or a twelve-character commit) and the repository path, with control characters
 escaped. It never prints the matched text, so the log cannot republish what it caught.
 
-The validated range follows the event:
+The scope follows the event:
 
-| Event | Range |
+| Event | Scope |
 | --- | --- |
-| `push` | `github.event.before` to `github.event.after` |
-| `pull_request` | `pull_request.base.sha` to `pull_request.head.sha` |
-| `merge_group` | `merge_group.base_sha` to `merge_group.head_sha` |
-| any other event | every commit reachable from the checked-out `HEAD` |
+| `push` | the tracked tree, plus every commit in `github.event.before` to `github.event.after` |
+| `pull_request` | the tracked tree, plus every commit in `pull_request.base.sha` to `pull_request.head.sha` |
+| `merge_group` | the tracked tree, plus every commit in `merge_group.base_sha` to `merge_group.head_sha` |
+| `schedule`, `workflow_dispatch` and any other event | the tracked tree at `HEAD` only |
 
-A range that has no usable start is widened, never narrowed. When `before` is all zeros (a new
-branch or the first push) or empty, or the base commit is not in the clone (for example after a
-force push), the check scans every commit reachable from the head and says so in its summary. The
-job already checks out full history; a shallow clone fails with exit status 2 instead of passing on
-partial evidence. `--history` forces the full scan for any caller or local run:
+The purpose is to stop new leaks reaching a repository, not to re-judge published history that no
+new commit can change. An event with no commit range has no new commits to judge, so it scans the
+tracked tree only: a leak that is still in the tree fails, and a leak that exists only in older
+commits passes. Otherwise every scheduled or manual run of a repository with a known historical
+leak would stay red until someone rewrote history.
+
+A push range with no usable start is narrowed, never widened to all of history. When `before` is
+all zeros (a new branch or the first push) or empty, or the base commit is not in the clone (for
+example after a force push), the check scans the tracked tree plus the head commit's own changes
+(against its first parent; a root commit adds everything) and says in its summary that earlier
+history is not scanned. A range with a usable start, and a pull request, are unchanged. A range
+scan on a shallow clone fails with exit status 2 instead of passing on partial evidence; the job
+already checks out full history. Only `--history` scans every commit reachable from the head, and
+only when passed explicitly, for an audit or a local run:
 
 ```bash
 python3 scripts/publication-hygiene.py --repo <path> --history

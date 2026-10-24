@@ -434,9 +434,9 @@ jobs:
             push) hygiene_range=(--base "${HYGIENE_PUSH_BEFORE}" --head "${HYGIENE_PUSH_AFTER}") ;;
             pull_request) hygiene_range=(--base "${HYGIENE_PR_BASE}" --head "${HYGIENE_PR_HEAD}") ;;
             merge_group) hygiene_range=(--base "${HYGIENE_MERGE_BASE}" --head "${HYGIENE_MERGE_HEAD}") ;;
-            *) hygiene_range=(--history) ;;
+            *) hygiene_range=() ;;
           esac
-          python3 - "${hygiene_range[@]}" <<'PY'
+          python3 - ${hygiene_range[@]+"${hygiene_range[@]}"} <<'PY'
           #!/usr/bin/env python3
           """Reject committed Python bytecode and absolute user-home paths before a repository is published."""
 
@@ -576,23 +576,29 @@ jobs:
 
 
           def select_commits(repo: str, history: bool, base: str | None, head: str) -> tuple[list[tuple[str, list[str]]], str]:
-              """Return (commit, parents) pairs to scan and a short description of the range."""
+              """Return (commit, parents) pairs to scan and a short description of the scope.
+
+              Only --history scans every commit. A range without a usable base narrows to the head commit's own
+              changes: published history that a new commit cannot change must not fail every later run.
+              """
               head_sha = resolve_commit(repo, head)
               if head_sha is None:
                   raise HygieneError("head revision is not a commit in this repository")
               revisions = [head_sha]
               description = "all commits reachable from head"
+              narrowed = False
               if not history and base is not None:
-                  if not base.strip() or ALL_ZEROS.fullmatch(base.strip()):
-                      description = "all commits reachable from head (no base revision, e.g. a new branch)"
+                  no_base = not base.strip() or ALL_ZEROS.fullmatch(base.strip()) is not None
+                  base_sha = None if no_base else resolve_commit(repo, base.strip())
+                  if base_sha is not None:
+                      revisions.append(f"^{base_sha}")
+                      description = "commits in the base..head range"
                   else:
-                      base_sha = resolve_commit(repo, base.strip())
-                      if base_sha is None:
-                          description = "all commits reachable from head (base revision is not available locally)"
-                      else:
-                          revisions.append(f"^{base_sha}")
-                          description = "commits in the base..head range"
-              if run_git(repo, "rev-parse", "--is-shallow-repository").stdout.strip() == b"true":
+                      reason = "no base revision, e.g. a new branch" if no_base else "base revision is not available locally"
+                      revisions = ["--max-count=1", head_sha]
+                      narrowed = True
+                      description = f"head commit's own changes only ({reason}); earlier history is not scanned"
+              if not narrowed and run_git(repo, "rev-parse", "--is-shallow-repository").stdout.strip() == b"true":
                   raise HygieneError("the repository is a shallow clone; fetch complete history before scanning commits")
               output = run_git(repo, "rev-list", "--parents", *revisions).stdout.decode()
               commits = []
@@ -679,10 +685,10 @@ jobs:
                   description="Reject tracked Python bytecode and absolute user-home paths in the worktree and in commits.",
               )
               parser.add_argument("--repo", default=".", help="repository to scan (default: current directory)")
-              parser.add_argument("--history", action="store_true", help="scan every commit reachable from the head revision")
+              parser.add_argument("--history", action="store_true", help="scan every commit reachable from the head revision (explicit only; no CI event implies it)")
               parser.add_argument(
                   "--base",
-                  help="scan commits in BASE..HEAD; an empty or all-zero BASE, or one that is not available locally, scans every commit",
+                  help="scan commits in BASE..HEAD; an empty or all-zero BASE, or one that is not available locally, scans the head commit's own changes only",
               )
               parser.add_argument("--head", default="HEAD", help="head revision of the range (default: HEAD)")
               parser.add_argument("--allowlist", help=f"reviewed exact-path allowlist (default: {ALLOWLIST_NAME} in the repository, if present)")
@@ -699,7 +705,7 @@ jobs:
                   allowlist_path = arguments.allowlist if explicit else os.path.join(arguments.repo, ALLOWLIST_NAME)
                   allowlist = load_allowlist(allowlist_path, required=explicit)
                   commits: list[tuple[str, list[str]]] = []
-                  description = "worktree only"
+                  description = "tracked tree at HEAD only; no commit range"
                   if arguments.history or arguments.base is not None:
                       commits, description = select_commits(arguments.repo, arguments.history, arguments.base, arguments.head)
                   findings, files, blobs = scan(arguments.repo, allowlist, commits)

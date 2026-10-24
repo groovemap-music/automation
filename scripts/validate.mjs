@@ -336,12 +336,15 @@ export function workflowContractIssues(path, content) {
     if (/^        if:/m.test(stepBlock(content, HYGIENE_STEP))) {
       errors.push(`${path}: ${HYGIENE_STEP} must run for every caller without a condition`);
     }
+    if (stepBlock(content, HYGIENE_STEP).includes("(--history)")) {
+      errors.push(`${path}: ${HYGIENE_STEP} must not scan full history for an event without a commit range`);
+    }
     requireStepMarkers(errors, path, content, HYGIENE_STEP, [
       "github.event.before",
       "github.event.after",
       "github.event.pull_request.base.sha",
       "github.event.pull_request.head.sha",
-      "hygiene_range=(--history)",
+      "hygiene_range=()",
     ]);
     const codecovUploads = [...content.matchAll(/^\s+uses:\s+codecov\/codecov-action@/gm)];
     if (codecovUploads.length !== 2) {

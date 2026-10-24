@@ -12,7 +12,8 @@ It performs three deterministic groups of checks:
 2. Standard-library behavior tests for links, exposure rules, action pins, organization Actions
    allowlist matching, dependency policy, specced Neo4j/PostgreSQL pytest fixtures, rendered
    Python/Rust/Node/container job contracts, invariant Dependabot behavior, five distinct Graph
-   Explorer browser uploads, and tag-release identity and evidence.
+   Explorer browser uploads, the opt-in per-project browser E2E jobs, and tag-release identity and
+   evidence.
 3. Repository validation covering required files, Markdown/local links, MIT and notice metadata,
    Mermaid diagrams, CI permissions, Dependabot ecosystems/labels, immutable action references,
    organization Actions allowlist membership, reusable interface contracts, tag-only publication,
@@ -37,6 +38,16 @@ nested-only roundtrip fixture simulates the artifact action stripping its single
 `coverage/unit.xml`, `coverage/e2e/chromium/lcov.info`, and nested failure results must be restored
 at those same workspace-relative paths. Separate negative cases prove that symlink traversal and a
 pre-existing destination collision fail closed.
+
+Both browser E2E modes are rendered from fixtures. Without `e2e-matrix`, every caller keeps the
+E2E steps inside Required validation and renders no project jobs. With it, Required validation
+keeps every other gate, including publication hygiene, and each mapped project gets its own job.
+Runtime cases extract the inline programs from the workflow and run them. A project job retains
+only its own LCOV and failure paths and rejects unsafe entries. Its artifact restores that project's
+LCOV for the Codecov upload. Required result fails when the project jobs fail, are cancelled or are
+skipped in matrix mode, and when they run without it. Mutation cases reject wiring that runs E2E in
+both places, skips a project's post-processing or evidence, waits on `validate`, stops on the first
+failing project, or drops an explicit timeout.
 
 The database-fixture action has separate positive and negative examples under
 `fixtures/database-fixtures`. Its behavior test proves that autospecced and explicitly specced

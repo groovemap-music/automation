@@ -673,6 +673,327 @@ test("keeps callers without browser coverage backward compatible", () => {
   }
 });
 
+const E2E_STEPS = [
+  "Install browser dependencies",
+  "Instrument browser JavaScript",
+  "Run browser end-to-end tests",
+  "Run E2E post-processing and teardown",
+];
+
+function jobStep(jobId, stepName) {
+  const job = parseWorkflowDefinition(REUSABLE_CI).jobs.find((candidate) => candidate.id === jobId);
+  assert.ok(job, `${jobId} must be present`);
+  const step = job.steps.find((candidate) => candidate.name === stepName);
+  assert.ok(step, `${jobId} must contain ${stepName}`);
+  return step;
+}
+
+function stepBash(jobId, stepName) {
+  const match = jobStep(jobId, stepName).raw.match(/        run: \|\n([\s\S]*)/);
+  assert.ok(match, `${stepName} must contain one inline Bash program`);
+  return match[1].split("\n").map((line) => line.slice(10)).join("\n");
+}
+
+function runStepBash(jobId, stepName, environment) {
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-step-bash-"));
+  const output = resolve(directory, "github-output");
+  try {
+    const result = spawnSync("bash", ["-e", "-c", stepBash(jobId, stepName)], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_OUTPUT: output, ...environment },
+    });
+    return { ...result, output: existsSync(output) ? readFileSync(output, "utf8") : "" };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runRequiredResult(environment) {
+  return runStepBash("result", "Enforce complete validation result", {
+    VALIDATION_RESULT: "success",
+    BROWSER_E2E_RESULT: "skipped",
+    BROWSER_CODECOV_RESULT: "skipped",
+    BROWSER_COVERAGE_MAPPING: "",
+    UPLOAD_CODECOV: "false",
+    E2E_MATRIX: "false",
+    ...environment,
+  }).status;
+}
+
+function runProjectEvidence(entry, environment = {}) {
+  return runStepBash("browser-e2e", "Resolve browser project evidence", {
+    E2E_COMMAND: "just e2e-run",
+    E2E_POST_COMMAND: "just e2e-post",
+    BROWSER_PROJECT: entry.project,
+    BROWSER_LCOV_PATH: entry.lcov,
+    BROWSER_ARTIFACT_PATHS_JSON: JSON.stringify(entry.artifacts),
+    ...environment,
+  });
+}
+
+test("without e2e-matrix every caller keeps E2E inside Required validation and renders no project jobs", () => {
+  for (const name of ["python-ci.json", "rust-ci.json", "node-ci.json", "container-ci.json", "browser-ci.json"]) {
+    const rendered = renderCiContract(REUSABLE_CI, fixture(name));
+    assert.deepEqual(rendered.issues, [], name);
+    assert.equal(rendered.inputs["e2e-matrix"], false, name);
+    assert.deepEqual(rendered.browserE2eRuns, [], name);
+    assert.ok(!rendered.jobs.some((job) => job.id === "browser-e2e"), name);
+  }
+  const browser = renderCiContract(REUSABLE_CI, fixture("browser-ci.json"));
+  const validateSteps = browser.jobs.find((job) => job.id === "validate").steps;
+  for (const step of E2E_STEPS) assert.ok(validateSteps.includes(step), step);
+  assert.deepEqual(browser.jobs.find((job) => job.id === "browser-codecov").steps.slice(0, 2), [
+    "Download retained coverage evidence",
+    "Restore workspace-relative coverage evidence",
+  ]);
+});
+
+test("e2e-matrix runs each browser project in its own job and keeps every other gate in Required validation", () => {
+  const scenario = fixture("browser-e2e-matrix-ci.json");
+  const matrix = renderCiContract(REUSABLE_CI, scenario);
+  const dependencyUpdate = renderCiContract(REUSABLE_CI, { ...scenario, actor: "dependabot[bot]" });
+  const inline = renderCiContract(REUSABLE_CI, { ...scenario, inputs: { ...scenario.inputs, "e2e-matrix": false } });
+  assert.deepEqual(matrix.issues, []);
+  assert.deepEqual(dependencyUpdate.jobs, matrix.jobs);
+
+  const steps = (rendered, id) => rendered.jobs.find((job) => job.id === id)?.steps;
+  assert.deepEqual(
+    steps(matrix, "validate"),
+    steps(inline, "validate").filter((step) => !E2E_STEPS.includes(step)),
+  );
+  assert.ok(steps(matrix, "validate").includes("Reject committed bytecode and local home paths"));
+  assert.deepEqual(steps(matrix, "browser-e2e"), [
+    "Resolve browser project evidence",
+    "Check out repository",
+    "Set up pinned repository tools",
+    "Install locked dependencies",
+    ...E2E_STEPS,
+    "Stage workspace-relative coverage evidence",
+    "Retain browser project evidence",
+  ]);
+  assert.equal(matrix.jobs.find((job) => job.id === "browser-e2e").needs, "");
+  assert.deepEqual(steps(matrix, "browser-codecov").slice(0, 2), [
+    "Download browser project evidence",
+    "Restore workspace-relative coverage evidence",
+  ]);
+  assert.equal(matrix.jobs.find((job) => job.id === "browser-codecov").needs, "[validate, browser-e2e]");
+  assert.equal(matrix.jobs.find((job) => job.id === "result").needs, "[validate, browser-e2e, browser-codecov]");
+
+  const mapping = JSON.parse(scenario.inputs["browser-coverage-mapping"]);
+  assert.deepEqual(
+    matrix.browserE2eRuns,
+    mapping.map(({ project, lcov, artifacts }) => ({ project, retainedPaths: [lcov, ...artifacts] })),
+  );
+  assert.deepEqual(matrix.codecovUploads.slice(1), inline.codecovUploads.slice(1));
+  assert.deepEqual(matrix.codecovUploads[0].files, ["coverage.xml", "explore/coverage/lcov.info"]);
+
+  const retain = jobStep("browser-e2e", "Retain browser project evidence");
+  const download = jobStep("browser-codecov", "Download browser project evidence");
+  assert.match(retain.raw, /name: \$\{\{ github\.event\.repository\.name \}\}-e2e-\$\{\{ matrix\.browser\.project \}\}-\$\{\{ github\.run_id \}\}/);
+  assert.match(download.raw, /name: \$\{\{ github\.event\.repository\.name \}\}-e2e-\$\{\{ matrix\.upload\.project \}\}-\$\{\{ github\.run_id \}\}/);
+  const job = parseWorkflowDefinition(REUSABLE_CI).jobs.find((candidate) => candidate.id === "browser-e2e");
+  assert.match(job.raw, /^    timeout-minutes: 45$/m);
+  assert.match(job.raw, /^      fail-fast: false$/m);
+  assert.match(job.raw, /^    env:\n      E2E_PROJECT: \$\{\{ matrix\.browser\.project \}\}$/m);
+});
+
+test("e2e-matrix fails closed without a browser mapping in the model and the interface runtime", () => {
+  const scenario = fixture("browser-e2e-matrix-ci.json");
+  const unmapped = { ...scenario.inputs, "browser-coverage-mapping": "" };
+  assert.ok(
+    renderCiContract(REUSABLE_CI, { ...scenario, inputs: unmapped }).issues.includes(
+      "browser-coverage-mapping is required when e2e-matrix is enabled",
+    ),
+  );
+
+  const environment = {
+    LANGUAGE: "mixed",
+    RUST_COMPILER_CACHE: "auto",
+    SETUP_COMMAND: "just setup",
+    CHECK_COMMAND: "just check",
+    COVERAGE_COMMAND: "just coverage",
+    AUDIT_COMMAND: "just audit",
+    LICENSE_COMMAND: "just license-check",
+    SECRET_SCAN_COMMAND: "just secret-scan",
+    PACKAGE_COMMAND: "just build",
+    INSTALL_COMMAND: "just install-check",
+    COVERAGE_FILES: "coverage.xml",
+    BROWSER_COVERAGE_MAPPING: scenario.inputs["browser-coverage-mapping"],
+    E2E_SETUP_COMMAND: "",
+    E2E_INSTRUMENT_COMMAND: "",
+    E2E_COMMAND: "just e2e-run",
+    E2E_POST_COMMAND: "just e2e-post",
+    E2E_MATRIX: "true",
+    REQUIRES_PRIVATE_LIBRARY: "false",
+  };
+  const interfaceStep = "Validate interface and fail closed";
+  assert.equal(runStepBash("validate", interfaceStep, environment).status, 0);
+  assert.equal(runStepBash("validate", interfaceStep, { ...environment, E2E_MATRIX: "false" }).status, 0);
+  const rejected = runStepBash("validate", interfaceStep, {
+    ...environment,
+    BROWSER_COVERAGE_MAPPING: "",
+    E2E_COMMAND: "",
+    E2E_POST_COMMAND: "",
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stdout, /browser-coverage-mapping is required when e2e-matrix is enabled/);
+});
+
+test("Required result fails when any browser project job fails and expects no project jobs by default", () => {
+  assert.equal(runRequiredResult({}), 0);
+  assert.notEqual(runRequiredResult({ BROWSER_E2E_RESULT: "success" }), 0);
+  assert.notEqual(runRequiredResult({ VALIDATION_RESULT: "failure" }), 0);
+
+  const matrix = { E2E_MATRIX: "true", BROWSER_E2E_RESULT: "success" };
+  assert.equal(runRequiredResult(matrix), 0);
+  for (const result of ["failure", "cancelled", "skipped"]) {
+    assert.notEqual(runRequiredResult({ ...matrix, BROWSER_E2E_RESULT: result }), 0, result);
+  }
+  assert.notEqual(runRequiredResult({ ...matrix, VALIDATION_RESULT: "failure" }), 0);
+
+  const uploaded = {
+    ...matrix,
+    UPLOAD_CODECOV: "true",
+    BROWSER_COVERAGE_MAPPING: fixture("browser-e2e-matrix-ci.json").inputs["browser-coverage-mapping"],
+  };
+  assert.equal(runRequiredResult({ ...uploaded, BROWSER_CODECOV_RESULT: "success" }), 0);
+  assert.notEqual(runRequiredResult({ ...uploaded, BROWSER_CODECOV_RESULT: "failure" }), 0);
+});
+
+test("each browser project job retains only its own LCOV and failure paths and rejects unsafe entries", () => {
+  const mapping = JSON.parse(fixture("browser-e2e-matrix-ci.json").inputs["browser-coverage-mapping"]);
+  const modelled = renderCiContract(REUSABLE_CI, fixture("browser-e2e-matrix-ci.json")).browserE2eRuns;
+  for (const [index, entry] of mapping.entries()) {
+    const resolved = runProjectEvidence(entry);
+    assert.equal(resolved.status, 0, resolved.stderr);
+    assert.deepEqual(jsonOutput(resolved.output, "retained-coverage-paths-json"), modelled[index].retainedPaths);
+  }
+  const overlapping = { ...mapping[0], artifacts: [mapping[0].lcov, "test-results/chromium"] };
+  assert.deepEqual(
+    jsonOutput(runProjectEvidence(overlapping).output, "retained-coverage-paths-json"),
+    [mapping[0].lcov, "test-results/chromium"],
+  );
+
+  const valid = mapping[0];
+  for (const entry of [
+    { ...valid, project: "Chromium" },
+    { ...valid, project: "chromium/../firefox" },
+    { ...valid, lcov: "coverage/e2e/*/lcov.info" },
+    { ...valid, lcov: "/coverage/e2e/chromium/lcov.info" },
+    { ...valid, lcov: "coverage/e2e/chromium/lcov.json" },
+    { ...valid, artifacts: [] },
+    { ...valid, artifacts: ["!test-results/chromium"] },
+    { ...valid, artifacts: ["test-results/../firefox"] },
+    { ...valid, artifacts: ["test-results/chromium", "test-results/chromium"] },
+  ]) {
+    assert.notEqual(runProjectEvidence(entry).status, 0, JSON.stringify(entry));
+  }
+  assert.notEqual(runProjectEvidence(valid, { E2E_COMMAND: " " }).status, 0);
+  assert.notEqual(runProjectEvidence(valid, { E2E_POST_COMMAND: "" }).status, 0);
+});
+
+test("a browser project artifact roundtrip restores that project's LCOV for its Codecov upload", () => {
+  const directory = mkdtempSync(resolve(tmpdir(), "groovemap-project-roundtrip-"));
+  const sourceWorkspace = resolve(directory, "source-workspace");
+  const restoredWorkspace = resolve(directory, "restored-workspace");
+  const runnerTemp = resolve(directory, "runner-temp");
+  const output = resolve(directory, "github-output");
+  const entry = JSON.parse(fixture("browser-e2e-matrix-ci.json").inputs["browser-coverage-mapping"])[1];
+  try {
+    mkdirSync(resolve(sourceWorkspace, "test-results/firefox"), { recursive: true });
+    mkdirSync(resolve(sourceWorkspace, "coverage/e2e/firefox"), { recursive: true });
+    writeFileSync(resolve(sourceWorkspace, entry.lcov), "TN:\n");
+    writeFileSync(resolve(sourceWorkspace, "test-results/firefox/pytest.log"), "passed\n");
+    mkdirSync(runnerTemp, { recursive: true });
+
+    const resolved = runProjectEvidence(entry);
+    assert.equal(resolved.status, 0, resolved.stderr);
+    const stageProgram = jobStep("browser-e2e", "Stage workspace-relative coverage evidence").raw
+      .match(/          python3 - <<'PY'\n([\s\S]*?)\n          PY/)[1]
+      .split("\n")
+      .map((line) => line.slice(10))
+      .join("\n");
+    assert.equal(stageProgram, inlinePythonForStep("Stage workspace-relative coverage evidence"));
+    const staged = spawnSync("python3", ["-c", stageProgram], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: output,
+        GITHUB_WORKSPACE: sourceWorkspace,
+        RETAINED_COVERAGE_PATHS_JSON: JSON.stringify(jsonOutput(resolved.output, "retained-coverage-paths-json")),
+        RUNNER_TEMP: runnerTemp,
+      },
+    });
+    assert.equal(staged.status, 0, staged.stderr);
+    const stagingRoot = resolve(runnerTemp, "groovemap-coverage-artifact");
+    const manifest = JSON.parse(readFileSync(resolve(stagingRoot, "manifest.json"), "utf8"));
+    assert.deepEqual(manifest.archived_paths, [entry.lcov, "test-results/firefox"]);
+
+    const downloadRoot = resolve(runnerTemp, "groovemap-coverage-download");
+    mkdirSync(downloadRoot, { recursive: true });
+    cpSync(resolve(stagingRoot, "manifest.json"), resolve(downloadRoot, "manifest.json"));
+    cpSync(resolve(stagingRoot, "workspace"), resolve(downloadRoot, "workspace"), { recursive: true });
+    mkdirSync(restoredWorkspace, { recursive: true });
+    const restored = runWorkflowPythonStep("Restore workspace-relative coverage evidence", {
+      BROWSER_LCOV_PATH: entry.lcov,
+      GITHUB_WORKSPACE: restoredWorkspace,
+      RUNNER_TEMP: runnerTemp,
+    });
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(readFileSync(resolve(restoredWorkspace, entry.lcov), "utf8"), "TN:\n");
+    assert.equal(readFileSync(resolve(restoredWorkspace, "test-results/firefox/pytest.log"), "utf8"), "passed\n");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects an e2e-matrix wiring that drops a project, its evidence, or its timeout", () => {
+  const path = ".github/workflows/reusable-ci.yml";
+  assert.deepEqual(workflowContractIssues(path, REUSABLE_CI), []);
+  const matrixStart = REUSABLE_CI.indexOf("  browser-e2e:\n");
+  const matrixEnd = REUSABLE_CI.indexOf("  browser-codecov:\n");
+  const inMatrix = (from, to) =>
+    REUSABLE_CI.slice(0, matrixStart) + REUSABLE_CI.slice(matrixStart, matrixEnd).replace(from, to) + REUSABLE_CI.slice(matrixEnd);
+  const cases = [
+    [
+      REUSABLE_CI.replace(
+        "if: inputs.e2e-command != '' && !inputs.e2e-matrix",
+        "if: inputs.e2e-command != ''",
+      ),
+      "Run browser end-to-end tests must run with exactly",
+    ],
+    [
+      inMatrix(
+        "if: always() && inputs.e2e-post-command != ''\n",
+        "if: always() && inputs.e2e-post-command != '' && !inputs.e2e-matrix\n",
+      ),
+      "Run E2E post-processing and teardown must run with exactly",
+    ],
+    [
+      inMatrix("if: always() && steps.project-evidence.outcome == 'success'", "if: success()"),
+      "Stage workspace-relative coverage evidence must run with exactly",
+    ],
+    [inMatrix("    timeout-minutes: 45\n", ""), "job browser-e2e must declare an explicit timeout-minutes"],
+    [inMatrix("    runs-on: ${{ inputs.runner }}\n", "    needs: validate\n    runs-on: ${{ inputs.runner }}\n"), "must not wait"],
+    [inMatrix("      fail-fast: false\n", ""), "fail-fast: false"],
+    [inMatrix("raise SystemExit(\"none of the declared", "raise SystemExit(\"no declared"), "same program as validate"],
+    [REUSABLE_CI.replace("test \"${BROWSER_E2E_RESULT}\" = success", "true"), "BROWSER_E2E_RESULT"],
+    [REUSABLE_CI.replace("    needs: [validate, browser-e2e]\n", "    needs: validate\n"), "needs: [validate, browser-e2e]"],
+    [
+      REUSABLE_CI.replace("if: success() && inputs.e2e-matrix", "if: success()"),
+      "Download browser project evidence must run with exactly",
+    ],
+  ];
+  for (const [source, expected] of cases) {
+    assert.notEqual(source, REUSABLE_CI, expected);
+    assert.ok(
+      workflowContractIssues(path, source).some((issue) => issue.includes(expected)),
+      `${expected}: ${workflowContractIssues(path, source).join("; ")}`,
+    );
+  }
+});
+
 test("rejects empty, malformed, globbed, and old multi-flag browser mappings", () => {
   const valid = JSON.parse(fixture("browser-ci.json").inputs["browser-coverage-mapping"]);
   const cases = [

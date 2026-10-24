@@ -12,6 +12,7 @@ check: test
     node --check scripts/workflow-contract.mjs
     PYTHONPYCACHEPREFIX=.build/pycache python3 -m py_compile .github/actions/validate-database-fixtures/validate.py
     PYTHONPYCACHEPREFIX=.build/pycache python3 -m py_compile .github/actions/validate-python-policy/validate.py
+    PYTHONPYCACHEPREFIX=.build/pycache python3 -m py_compile scripts/publication-hygiene.py
     node scripts/validate.mjs
 
 test:
@@ -19,3 +20,8 @@ test:
     python3 scripts/validate-database-fixtures.test.py
     PYTHONPYCACHEPREFIX=.build/pycache python3 scripts/validate-python-policy.test.py
     PYTHONPYCACHEPREFIX=.build/pycache python3 scripts/signed-codecov.test.py
+    PYTHONPYCACHEPREFIX=.build/pycache python3 scripts/publication-hygiene.test.py
+
+# Reject tracked bytecode and absolute user-home paths in the worktree and in every commit.
+hygiene *args:
+    python3 -B scripts/publication-hygiene.py {{args}}

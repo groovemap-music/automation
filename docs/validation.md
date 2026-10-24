@@ -44,6 +44,15 @@ database doubles pass, an unrelated HTTP double is ignored, a line-scoped exempt
 reason, and permissive Neo4j/PostgreSQL fixtures fail with repository-local paths. The checker
 parses Python source only; it does not import database drivers or open a connection.
 
+The publication-hygiene check has its own behavior test, `scripts/publication-hygiene.test.py`. It
+builds throwaway repositories and a real compiled `.pyc` at test time from a synthetic source path
+assembled from parts, so no fixture contains a real user name or path. It proves that tracked
+bytecode and each home-path class fail in the worktree and in history (including a file added and
+then deleted inside the range), that output never contains the matched name, that the allowlist is
+exact, that a new-branch range is widened to full history, and that the copy embedded in
+`reusable-ci.yml` is identical to the script. `just hygiene --history` runs the check on this
+repository, and `ci.yml` does the same.
+
 The command reads only the checkout and creates no tracked files. It does not require a package
 install, network connection, GitHub token, organization secret, container runtime, or live service.
 It validates Dependabot against the declared OpenTofu label taxonomy; confirming and applying the

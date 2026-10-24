@@ -48,6 +48,7 @@ const REQUIRED_FILES = [
   "fixtures/contracts/container-ci.json",
   "fixtures/contracts/container-release.json",
   "fixtures/contracts/browser-ci.json",
+  "fixtures/contracts/browser-e2e-matrix-ci.json",
   "fixtures/contracts/node-ci.json",
   "fixtures/contracts/python-ci.json",
   "fixtures/contracts/rust-ci.json",
@@ -243,6 +244,14 @@ function stepBlock(content, name) {
   return content.slice(start, next < 0 ? content.length : next);
 }
 
+function jobBlock(content, id) {
+  const start = content.search(new RegExp(`^  ${id}:\\s*$`, "m"));
+  if (start < 0) return "";
+  const rest = content.slice(start + 1);
+  const next = rest.search(/^  [A-Za-z0-9_-]+:\s*$/m);
+  return content.slice(start, next < 0 ? content.length : start + 1 + next);
+}
+
 function requireStepCondition(errors, path, content, name, condition) {
   const block = stepBlock(content, name);
   if (!block.includes(`if: ${condition}`)) errors.push(`${path}: ${name} must run with ${condition}`);
@@ -253,6 +262,88 @@ function requireStepMarkers(errors, path, content, name, markers) {
   for (const marker of markers) {
     if (!block.includes(marker)) errors.push(`${path}: ${name} must contain ${marker}`);
   }
+}
+
+const VALIDATE_E2E_STEPS = [
+  ["Install browser dependencies", "inputs.e2e-command != '' && inputs.e2e-setup-command != '' && !inputs.e2e-matrix"],
+  ["Instrument browser JavaScript", "inputs.e2e-command != '' && inputs.e2e-instrument-command != '' && !inputs.e2e-matrix"],
+  ["Run browser end-to-end tests", "inputs.e2e-command != '' && !inputs.e2e-matrix"],
+  ["Run E2E post-processing and teardown", "always() && inputs.e2e-post-command != '' && !inputs.e2e-matrix"],
+];
+const BROWSER_E2E_STEPS = [
+  ["Run E2E post-processing and teardown", "always() && inputs.e2e-post-command != ''"],
+  ["Stage workspace-relative coverage evidence", "always() && steps.project-evidence.outcome == 'success'"],
+  ["Retain browser project evidence", "always() && steps.stage-coverage.outcome == 'success'"],
+];
+const BROWSER_CODECOV_DOWNLOADS = [
+  ["Download retained coverage evidence", "success() && !inputs.e2e-matrix"],
+  ["Download browser project evidence", "success() && inputs.e2e-matrix"],
+];
+const STAGE_COVERAGE_STEP = "Stage workspace-relative coverage evidence";
+
+function requireExactStepConditions(errors, path, block, steps) {
+  for (const [name, condition] of steps) {
+    if (!stepBlock(block, name).includes(`\n        if: ${condition}\n`)) {
+      errors.push(`${path}: ${name} must run with exactly ${condition}`);
+    }
+  }
+}
+
+function inlineProgram(block) {
+  return block.match(/          python3 - <<'PY'\n([\s\S]*?)\n          PY/)?.[1] ?? "";
+}
+
+// The opt-in e2e-matrix mode moves the E2E lifecycle out of Required validation into one job per
+// browser project; the default mode keeps it in validate. Every job's timeout stays explicit.
+function e2eMatrixContractIssues(path, content) {
+  const errors = [];
+  const jobsStart = content.search(/^jobs:\s*$/m);
+  const jobIds = jobsStart < 0
+    ? []
+    : [...content.slice(jobsStart).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)].map((match) => match[1]);
+  for (const id of jobIds) {
+    if (!/^    timeout-minutes: [1-9][0-9]*$/m.test(jobBlock(content, id))) {
+      errors.push(`${path}: job ${id} must declare an explicit timeout-minutes`);
+    }
+  }
+
+  const validate = jobBlock(content, "validate");
+  requireExactStepConditions(errors, `${path} validate`, validate, VALIDATE_E2E_STEPS);
+
+  const matrix = jobBlock(content, "browser-e2e");
+  if (!matrix) {
+    errors.push(`${path}: the e2e-matrix mode needs the browser-e2e job`);
+    return errors;
+  }
+  requireMarkers(errors, `${path} browser-e2e`, matrix, [
+    "    if: inputs.e2e-matrix && inputs.browser-coverage-mapping != ''",
+    "      fail-fast: false",
+    "        browser: ${{ fromJSON(inputs.browser-coverage-mapping) }}",
+    "      E2E_PROJECT: ${{ matrix.browser.project }}",
+    "BROWSER_LCOV_PATH: ${{ matrix.browser.lcov }}",
+    "BROWSER_ARTIFACT_PATHS_JSON: ${{ toJSON(matrix.browser.artifacts) }}",
+    "run: ${{ inputs.setup-command }}",
+    "run: ${{ inputs.e2e-command }}",
+    "name: ${{ github.event.repository.name }}-e2e-${{ matrix.browser.project }}-${{ github.run_id }}",
+    "if-no-files-found: error",
+  ]);
+  if (/^    needs:/m.test(matrix)) errors.push(`${path}: browser-e2e must not wait for another job`);
+  if (/^\s+uses:\s+codecov\/codecov-action@/m.test(matrix)) {
+    errors.push(`${path}: browser-e2e must leave Codecov upload to the browser-codecov job`);
+  }
+  requireExactStepConditions(errors, `${path} browser-e2e`, matrix, BROWSER_E2E_STEPS);
+  const stagedByValidate = inlineProgram(stepBlock(validate, STAGE_COVERAGE_STEP));
+  if (!stagedByValidate || stagedByValidate !== inlineProgram(stepBlock(matrix, STAGE_COVERAGE_STEP))) {
+    errors.push(`${path}: browser-e2e must stage evidence with the same program as validate`);
+  }
+
+  const upload = jobBlock(content, "browser-codecov");
+  requireExactStepConditions(errors, `${path} browser-codecov`, upload, BROWSER_CODECOV_DOWNLOADS);
+  requireStepMarkers(errors, `${path} browser-codecov`, upload, "Download browser project evidence", [
+    "name: ${{ github.event.repository.name }}-e2e-${{ matrix.upload.project }}-${{ github.run_id }}",
+    "path: ${{ runner.temp }}/groovemap-coverage-download",
+  ]);
+  return errors;
 }
 
 export function workflowContractIssues(path, content) {
@@ -305,8 +396,14 @@ export function workflowContractIssues(path, content) {
       "Restore workspace-relative coverage evidence",
       "if-no-files-found: error",
       "include-hidden-files: true",
-      "needs: validate",
+      "e2e-matrix:",
+      "E2E_MATRIX: ${{ inputs.e2e-matrix }}",
+      "browser-coverage-mapping is required when e2e-matrix is enabled",
+      "needs: [validate, browser-e2e]",
+      "needs: [validate, browser-e2e, browser-codecov]",
       "test \"${VALIDATION_RESULT}\" = success",
+      "test \"${BROWSER_E2E_RESULT}\" = success",
+      "test \"${BROWSER_E2E_RESULT}\" = skipped",
       "^[0-9a-f]{40}$",
       "no reduced gate is available",
       "upload: ${{ fromJSON(inputs.browser-coverage-mapping) }}",
@@ -382,8 +479,9 @@ export function workflowContractIssues(path, content) {
       path,
       content,
       "Run E2E post-processing and teardown",
-      "always() && inputs.e2e-post-command != ''",
+      "always() && inputs.e2e-post-command != '' && !inputs.e2e-matrix",
     );
+    errors.push(...e2eMatrixContractIssues(path, content));
     requireStepCondition(
       errors,
       path,
@@ -597,7 +695,7 @@ function checkContractFixtures(errors) {
     }
   }
 
-  for (const capability of ["python", "rust", "node", "container", "browser", "tag-release"]) {
+  for (const capability of ["python", "rust", "node", "container", "browser", "browser-e2e-matrix", "tag-release"]) {
     if (!capabilities.has(capability)) errors.push(`fixtures/contracts: missing representative ${capability} fixture`);
   }
 }

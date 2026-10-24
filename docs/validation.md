@@ -49,9 +49,11 @@ builds throwaway repositories and a real compiled `.pyc` at test time from a syn
 assembled from parts, so no fixture contains a real user name or path. It proves that tracked
 bytecode and each home-path class fail in the worktree and in history (including a file added and
 then deleted inside the range), that output never contains the matched name, that the allowlist is
-exact, that a new-branch range is widened to full history, and that the copy embedded in
-`reusable-ci.yml` is identical to the script. `just hygiene --history` runs the check on this
-repository, and `ci.yml` does the same.
+exact, that an event with no commit range scans the tracked tree only and a push with no usable
+base scans the tree plus the head commit (full history needs an explicit `--history`), that the
+workflow step sets that scope for each event, and that the copy embedded in `reusable-ci.yml` is
+identical to the script. `just hygiene --history` runs the check on this repository, and `ci.yml`
+does the same.
 
 The command reads only the checkout and creates no tracked files. It does not require a package
 install, network connection, GitHub token, organization secret, container runtime, or live service.

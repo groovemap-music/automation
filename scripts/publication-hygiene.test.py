@@ -254,20 +254,72 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(check(repo.path, "--base", base, "--head", head).returncode, 1)
         self.assertEqual(check(repo.path, "--base", head, "--head", head).returncode, 0)
 
-    def test_new_branch_and_first_push_scan_everything(self):
+    def test_without_a_usable_base_only_the_head_commit_and_tree_are_scanned(self):
         repo, _, leak, last = self.leak_then_delete()
         for base in ("0" * 40, "", "f" * 40):
             with self.subTest(base=base):
                 result = check(repo.path, "--base", base, "--head", last)
-                self.assertEqual(result.returncode, 1)
-                self.assertIn(f"in {leak[:12]}: notes/trace.txt", result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("head commit's own changes only", result.stdout)
+                self.assertIn("earlier history is not scanned", result.stdout)
+                self.assertIn("1 commit(s)", result.stdout)
+                self.assertNotIn(leak[:12], result.stdout + result.stderr)
 
-    def test_clean_new_branch_reports_its_scope(self):
+    def test_the_head_commit_own_changes_still_fail_without_a_usable_base(self):
+        repo, _, _, _ = self.leak_then_delete()
+        leaking = repo.commit("new leak", {"notes/new.txt": f"at {LINUX_PATH}\n"})
+        repo.commit("remove again", remove=("notes/new.txt",))
+        for base in ("0" * 40, "f" * 40):
+            with self.subTest(base=base, head="leaking commit"):
+                result = check(repo.path, "--base", base, "--head", leaking)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"home-path-linux in {leaking[:12]}: notes/new.txt", result.stderr)
+                self.assertNotIn("notes/trace.txt", result.stderr)
+        self.assertEqual(check(repo.path, "--base", "0" * 40).returncode, 0, "the later head no longer holds the leak")
+
+    def test_a_root_head_commit_is_scanned_in_full_without_a_base(self):
+        repo = Repository(self)
+        root = repo.commit("root leak", {"notes.txt": f"{WINDOWS_PATH}\n", "README.md": "synthetic\n"})
+        result = check(repo.path, "--base", "0" * 40, "--head", root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"home-path-windows in {root[:12]}: notes.txt", result.stderr)
+
+    def test_a_merge_head_is_compared_with_its_first_parent(self):
+        repo = Repository(self)
+        repo.commit("base", {"README.md": "synthetic\n"})
+        git(repo.path, "checkout", "--quiet", "-b", "topic")
+        repo.commit("topic", {"topic.txt": "synthetic\n"})
+        git(repo.path, "checkout", "--quiet", "main")
+        repo.commit("main", {"main.txt": "synthetic\n"})
+        git(repo.path, "merge", "--quiet", "--no-ff", "-m", "merge", "topic")
+        result = check(repo.path, "--base", "0" * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1 commit(s)", result.stdout)
+
+    def test_a_shallow_clone_can_scan_the_head_commit_but_not_a_range_or_history(self):
+        repo, _, _, last = self.leak_then_delete()
+        with tempfile.TemporaryDirectory() as scratch:
+            clone = Path(scratch) / "clone"
+            git(scratch, "clone", "--quiet", "--depth", "1", f"file://{repo.path}", str(clone))
+            self.assertEqual(check(clone, "--base", "0" * 40, "--head", last).returncode, 0)
+            self.assertEqual(check(clone, "--base", last).returncode, 2)
+
+    def test_a_clean_new_branch_reports_its_narrowed_scope(self):
         repo = Repository(self)
         head = repo.commit("clean", {"README.md": "synthetic\n"})
         result = check(repo.path, "--base", "0" * 40, "--head", head)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("no base revision", result.stdout)
+        result = check(repo.path, "--base", "f" * 40, "--head", head)
+        self.assertIn("base revision is not available locally", result.stdout)
+
+    def test_history_is_explicit_only(self):
+        repo, _, leak, _ = self.leak_then_delete()
+        self.assertEqual(check(repo.path).returncode, 0)
+        self.assertIn("tracked tree at HEAD only", check(repo.path).stdout)
+        result = check(repo.path, "--history")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"in {leak[:12]}: notes/trace.txt", result.stderr)
 
     def test_a_blob_shared_by_two_commits_is_reported_for_each(self):
         repo = Repository(self)
@@ -354,7 +406,7 @@ class WorkflowEmbeddingTests(unittest.TestCase):
 
     def embedded_script(self):
         lines = WORKFLOW.read_text(encoding="utf-8").split("\n")
-        start = lines.index("          python3 - \"${hygiene_range[@]}\" <<'PY'") + 1
+        start = lines.index("          python3 - ${hygiene_range[@]+\"${hygiene_range[@]}\"} <<'PY'") + 1
         end = lines.index("          PY", start)
         return "\n".join(line[10:] if line.strip() else "" for line in lines[start:end]) + "\n"
 
@@ -379,6 +431,39 @@ class WorkflowEmbeddingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("home-path-macos in worktree: notes.txt", result.stderr)
 
+    def run_step(self, repo, **environment):
+        lines = WORKFLOW.read_text(encoding="utf-8").split("\n")
+        step = lines.index(f"      - name: {self.STEP}")
+        start = lines.index("        run: |", step) + 1
+        end = lines.index("          PY", start) + 1
+        script = "\n".join(line[10:] if line.strip() else "" for line in lines[start:end]) + "\n"
+        env = {**GIT_ENV, **{f"HYGIENE_{key}": value for key, value in environment.items()}}
+        return subprocess.run(["bash", "-c", script], cwd=repo.path, capture_output=True, text=True, env=env, check=False)
+
+    def test_the_step_scopes_each_event(self):
+        repo = Repository(self)
+        first = repo.commit("clean", {"README.md": "synthetic\n"})
+        repo.commit("leak", {"notes.txt": f"{MAC_PATH}\n"})
+        head = repo.commit("remove", remove=("notes.txt",))
+        for event in ("schedule", "workflow_dispatch", "release"):
+            with self.subTest(event=event):
+                result = self.run_step(repo, EVENT=event)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("tracked tree at HEAD only", result.stdout)
+        result = self.run_step(repo, EVENT="push", PUSH_BEFORE="0" * 40, PUSH_AFTER=head)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("head commit's own changes only", result.stdout)
+        result = self.run_step(repo, EVENT="push", PUSH_BEFORE=first, PUSH_AFTER=head)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("home-path-macos in", result.stderr)
+        result = self.run_step(repo, EVENT="pull_request", PR_BASE=first, PR_HEAD=head)
+        self.assertEqual(result.returncode, 1)
+        (repo.path / "tree.txt").write_text(f"{LINUX_PATH}\n", encoding="utf-8")
+        git(repo.path, "add", "tree.txt")
+        result = self.run_step(repo, EVENT="schedule")
+        self.assertEqual(result.returncode, 1, "a leak in the tracked tree still fails a scheduled run")
+        self.assertIn("home-path-linux in worktree: tree.txt", result.stderr)
+
     def test_the_step_is_in_required_validation_after_the_secret_scan(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         scan = workflow.index("      - name: Scan repository and history for secrets")
@@ -394,7 +479,7 @@ class WorkflowEmbeddingTests(unittest.TestCase):
             "github.event.pull_request.base.sha",
             "github.event.pull_request.head.sha",
             "github.event.merge_group.base_sha",
-            "hygiene_range=(--history)",
+            "hygiene_range=()",
         ):
             self.assertIn(expected, block)
         self.assertNotIn("if:", block, "every caller runs the check")

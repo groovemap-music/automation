@@ -315,7 +315,7 @@ export function validateCoverageFiles(raw) {
 export function validateBrowserCoverageMapping(raw) {
   const issues = [];
   if (raw === "" || raw === undefined) {
-    return { issues, uploads: [], artifactPaths: [], lcovPaths: [], retainedPaths: [] };
+    return { issues, uploads: [], artifactPaths: [], lcovPaths: [], retainedPaths: [], projectEvidence: [] };
   }
   if (typeof raw !== "string") {
     return {
@@ -324,6 +324,7 @@ export function validateBrowserCoverageMapping(raw) {
       artifactPaths: [],
       lcovPaths: [],
       retainedPaths: [],
+      projectEvidence: [],
     };
   }
 
@@ -337,6 +338,7 @@ export function validateBrowserCoverageMapping(raw) {
       artifactPaths: [],
       lcovPaths: [],
       retainedPaths: [],
+      projectEvidence: [],
     };
   }
   if (!Array.isArray(mapping) || mapping.length === 0) {
@@ -346,6 +348,7 @@ export function validateBrowserCoverageMapping(raw) {
       artifactPaths: [],
       lcovPaths: [],
       retainedPaths: [],
+      projectEvidence: [],
     };
   }
 
@@ -353,6 +356,7 @@ export function validateBrowserCoverageMapping(raw) {
   const lcovPaths = new Set();
   const artifactPaths = new Set();
   const uploads = [];
+  const projectEvidence = [];
   const retainedPaths = [];
   const retainedPathSet = new Set();
   const retain = (path) => {
@@ -403,6 +407,7 @@ export function validateBrowserCoverageMapping(raw) {
       }
     }
     uploads.push({ project, lcov, flag: `e2e-${project}` });
+    projectEvidence.push({ project, retainedPaths: [...new Set([lcov, ...(Array.isArray(artifacts) ? artifacts : [])])] });
   }
 
   return {
@@ -411,6 +416,7 @@ export function validateBrowserCoverageMapping(raw) {
     artifactPaths: [...artifactPaths],
     lcovPaths: [...lcovPaths],
     retainedPaths,
+    projectEvidence,
   };
 }
 
@@ -502,6 +508,9 @@ export function renderCiContract(content, scenario) {
   if (call.inputs["browser-coverage-mapping"] && !call.inputs["e2e-command"]) {
     issues.push("E2E command is required when browser coverage is configured");
   }
+  if (call.inputs["e2e-matrix"] && !call.inputs["browser-coverage-mapping"]) {
+    issues.push("browser-coverage-mapping is required when e2e-matrix is enabled");
+  }
 
   const jobs = definition.jobs
     .filter((job) => conditionApplies(job.condition, call.inputs, actor))
@@ -547,6 +556,7 @@ export function renderCiContract(content, scenario) {
     inputs: call.inputs,
     jobs,
     browserUploads: browserCoverage.uploads,
+    browserE2eRuns: call.inputs["e2e-matrix"] ? browserCoverage.projectEvidence : [],
     browserArtifactPaths: browserCoverage.artifactPaths,
     browserLcovPaths: browserCoverage.lcovPaths,
     coverageArtifactPaths: genericCoverage.paths,

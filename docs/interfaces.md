@@ -6,7 +6,8 @@ the selected workflow or action to a reviewed forty-character commit SHA.
 
 ## Pull-request CI
 
-`.github/workflows/reusable-ci.yml` exposes one `validate` job and one aggregate `result` job. The
+`.github/workflows/reusable-ci.yml` exposes one `validate` job, the optional per-browser-project
+jobs described below, and one aggregate `result` job. The
 graph never branches on the actor or event type, so a Dependabot pull request runs the same format,
 lint, type, test, coverage, contract, dependency-audit, license, secret-scan, publication-hygiene,
 package, install, integration, and container commands as an ordinary pull request. Optional integration and image
@@ -14,7 +15,8 @@ steps are repository capabilities, not actor-specific fallbacks.
 
 The manifest's complete optional input set is `runner` (`ubuntu-24.04`),
 `rust-compiler-cache` (`auto`), `sccache-gha-version` (empty), `image-command` (empty),
-`integration-command` (empty), all four `e2e-*` commands (empty), `coverage-flags` (`unit`),
+`integration-command` (empty), all four `e2e-*` commands (empty), `e2e-matrix` (`false`),
+`coverage-flags` (`unit`),
 `browser-coverage-mapping` (empty), `upload-codecov` (`false`),
 `requires-private-library` (`false`), `private-library-client-id` (empty), and
 `private-library-revision` (empty). Values in parentheses are defaults. The two optional secrets are
@@ -100,6 +102,54 @@ isolated: callers must write each project's failure evidence only beneath that p
 paths and must not clear an earlier project's paths when starting the next project. An empty JSON
 array, malformed project, newline, glob, or former multi-flag shape fails before upload. Omitting the
 input remains supported for non-browser callers.
+
+### Per-project browser E2E
+
+By default every browser project runs inside `validate`, on one runner, under its 45-minute
+limit. Browser suites that render with software WebGL are CPU-bound, so projects running side by
+side on that runner slow each other down: Graph Explorer's five projects took 36.6 of the 42 minutes
+of Required validation in run 40080249397. `e2e-matrix: true` gives each project its own runner.
+
+With `e2e-matrix: true`:
+
+- `validate` skips its four E2E steps (browser setup, instrumentation, tests and post-processing).
+  Every other gate stays in `validate` unchanged, including the publication-hygiene step, the
+  integration and container commands, generic coverage retention and the generic Codecov upload.
+- A `browser-e2e` matrix job, shown as `Browser E2E (<project>)`, runs once per
+  `browser-coverage-mapping` entry, in parallel with `validate` and with `fail-fast: false`. Each
+  job first validates its own entry, so an unsafe path fails before any setup runs. It then checks
+  out the repository and provisions tools, the private library and the Rust compiler cache under the
+  same conditions as `validate`. It runs `setup-command`, `e2e-setup-command`,
+  `e2e-instrument-command` and `e2e-command`, then `e2e-post-command` with `always()`.
+- Every step in a project job sees `E2E_PROJECT` set to that entry's `project` slug. The caller's
+  E2E commands must use it to set up, run and post-process only that project. For example, the
+  post-processing command writes only that project's mapped LCOV. No job runs every project, so no
+  job can build a report merged across projects.
+- Each project job stages its mapped LCOV and failure-artifact paths with the same staging program
+  as `validate`. It retains them as the `<repository>-e2e-<project>-<run_id>` artifact for 14 days
+  with `if-no-files-found: error`, so a project's traces, screenshots and logs are kept even when
+  its tests fail.
+- `browser-codecov` waits for `validate` and every project job. It downloads the project's own
+  artifact instead of the `validate` artifact, then uploads exactly as in the default mode: one
+  LCOV, one `e2e-<project>` flag, automatic search disabled, and the commit metadata that
+  `validate` resolved.
+
+Every job keeps an explicit `timeout-minutes`: 45 for `validate` and for each project job, 10 for
+each `browser-codecov` job, and 5 for `result`.
+
+`Required result` requires `validate` to succeed in both modes. With `e2e-matrix: true` it also
+requires the `browser-e2e` result to be `success`. GitHub reports a matrix job as failed when any
+project fails or is cancelled, so one failing project fails Required result. A skipped matrix also
+fails it. Without the input, the `browser-e2e` result must be `skipped`. The `browser-codecov` rule
+is the same in both modes.
+
+The mode needs `browser-coverage-mapping`. The interface step fails closed when the mapping is
+missing, and the mapping already requires `e2e-command` and `e2e-post-command`. In this mode,
+`coverage-files` must list only reports that `validate` produces. For example, leave out a merged
+all-browser LCOV, which no job produces any more. Each project's coverage reaches Codecov through
+its own flag. A caller opts in by adding `e2e-matrix: true` to the inputs of its CI call and
+updating its E2E commands to read `E2E_PROJECT`. Callers that omit the input keep the same jobs and
+steps: the project jobs are skipped, and Required result requires them to be skipped.
 
 ### Publication hygiene
 

@@ -89,6 +89,13 @@ on:
         required: false
         default: ""
         type: string
+      e2e-matrix:
+        description: >-
+          Run each browser-coverage-mapping project's E2E lifecycle in its own job, with E2E_PROJECT
+          set to the project slug, instead of running every project inside Required validation.
+        required: false
+        default: false
+        type: boolean
       coverage-files:
         description: Newline-separated explicit repository-relative coverage report paths.
         required: true
@@ -182,6 +189,7 @@ jobs:
           E2E_INSTRUMENT_COMMAND: ${{ inputs.e2e-instrument-command }}
           E2E_COMMAND: ${{ inputs.e2e-command }}
           E2E_POST_COMMAND: ${{ inputs.e2e-post-command }}
+          E2E_MATRIX: ${{ inputs.e2e-matrix }}
           REQUIRES_PRIVATE_LIBRARY: ${{ inputs.requires-private-library }}
           PRIVATE_LIBRARY_CLIENT_ID: ${{ inputs.private-library-client-id }}
           PRIVATE_LIBRARY_PRIVATE_KEY: ${{ secrets.PRIVATE_LIBRARY_PRIVATE_KEY }}
@@ -329,6 +337,10 @@ jobs:
 
           if [[ -n "${BROWSER_COVERAGE_MAPPING}" && -z "${E2E_COMMAND}" ]]; then
             echo "::error::e2e-command is required when browser-coverage-mapping is configured"
+            exit 1
+          fi
+          if [[ "${E2E_MATRIX}" == "true" && -z "${BROWSER_COVERAGE_MAPPING}" ]]; then
+            echo "::error::browser-coverage-mapping is required when e2e-matrix is enabled"
             exit 1
           fi
 
@@ -746,17 +758,17 @@ jobs:
         run: ${{ inputs.install-command }}
 
       - name: Install browser dependencies
-        if: inputs.e2e-command != '' && inputs.e2e-setup-command != ''
+        if: inputs.e2e-command != '' && inputs.e2e-setup-command != '' && !inputs.e2e-matrix
         shell: bash
         run: ${{ inputs.e2e-setup-command }}
 
       - name: Instrument browser JavaScript
-        if: inputs.e2e-command != '' && inputs.e2e-instrument-command != ''
+        if: inputs.e2e-command != '' && inputs.e2e-instrument-command != '' && !inputs.e2e-matrix
         shell: bash
         run: ${{ inputs.e2e-instrument-command }}
 
       - name: Run browser end-to-end tests
-        if: inputs.e2e-command != ''
+        if: inputs.e2e-command != '' && !inputs.e2e-matrix
         shell: bash
         run: ${{ inputs.e2e-command }}
 
@@ -766,7 +778,7 @@ jobs:
         run: ${{ inputs.integration-command }}
 
       - name: Run E2E post-processing and teardown
-        if: always() && inputs.e2e-post-command != ''
+        if: always() && inputs.e2e-post-command != '' && !inputs.e2e-matrix
         shell: bash
         run: ${{ inputs.e2e-post-command }}
 
@@ -957,10 +969,271 @@ jobs:
           fi
           sccache --show-stats
 
+  browser-e2e:
+    name: Browser E2E (${{ matrix.browser.project }})
+    if: inputs.e2e-matrix && inputs.browser-coverage-mapping != ''
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: ${{ fromJSON(inputs.browser-coverage-mapping) }}
+    env:
+      E2E_PROJECT: ${{ matrix.browser.project }}
+    steps:
+      - name: Resolve browser project evidence
+        id: project-evidence
+        shell: bash
+        env:
+          E2E_COMMAND: ${{ inputs.e2e-command }}
+          E2E_POST_COMMAND: ${{ inputs.e2e-post-command }}
+          BROWSER_PROJECT: ${{ matrix.browser.project }}
+          BROWSER_LCOV_PATH: ${{ matrix.browser.lcov }}
+          BROWSER_ARTIFACT_PATHS_JSON: ${{ toJSON(matrix.browser.artifacts) }}
+        run: |
+          if [[ -z "${E2E_COMMAND//[[:space:]]/}" || -z "${E2E_POST_COMMAND//[[:space:]]/}" ]]; then
+            echo "::error::e2e-command and e2e-post-command are required when e2e-matrix is enabled"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import PurePosixPath
+
+          def explicit_path(value, *, lcov=False):
+              if not isinstance(value, str) or not value or value != value.strip():
+                  return False
+              if any(character in value for character in "\r\n,\\*?[]{}"):
+                  return False
+              if value.startswith("!"):
+                  return False
+              path = PurePosixPath(value)
+              if path.is_absolute() or value.startswith("./") or ".." in path.parts:
+                  return False
+              if path.as_posix() != value or value == ".":
+                  return False
+              return not lcov or path.suffix in {".info", ".lcov"}
+
+          project = os.environ["BROWSER_PROJECT"]
+          lcov = os.environ["BROWSER_LCOV_PATH"]
+          try:
+              artifacts = json.loads(os.environ["BROWSER_ARTIFACT_PATHS_JSON"])
+          except json.JSONDecodeError as error:
+              raise SystemExit("browser project failure-artifact paths must be a JSON array") from error
+
+          if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", project):
+              raise SystemExit("browser project has an invalid project flag")
+          if not explicit_path(lcov, lcov=True):
+              raise SystemExit(f"browser project {project} needs one explicit LCOV file")
+          if not isinstance(artifacts, list) or not artifacts:
+              raise SystemExit(f"browser project {project} needs failure-artifact paths")
+          if len(artifacts) != len(set(map(str, artifacts))):
+              raise SystemExit(f"browser project {project} contains a duplicate failure-artifact path")
+          retained_paths = [lcov]
+          for artifact in artifacts:
+              if not explicit_path(artifact):
+                  raise SystemExit(f"browser project {project} has a non-explicit failure-artifact path")
+              if artifact not in retained_paths:
+                  retained_paths.append(artifact)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              retained_paths_json = json.dumps(retained_paths, separators=(",", ":"))
+              output.write(f"retained-coverage-paths-json={retained_paths_json}\n")
+          PY
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up pinned repository tools
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          install: true
+          cache: true
+
+      - name: Mint private-library token
+        id: app-token
+        if: inputs.requires-private-library
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.private-library-client-id }}
+          private-key: ${{ secrets.PRIVATE_LIBRARY_PRIVATE_KEY }}
+          owner: groovemap-music
+          repositories: python-libraries
+
+      - name: Check out pinned private library
+        if: inputs.requires-private-library
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: groovemap-music/python-libraries
+          ref: ${{ inputs.private-library-revision }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: python-libraries
+
+      - name: Authorize private Git dependencies
+        if: inputs.requires-private-library
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${APP_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GROOVEMAP_RUNTIME_REPO=${GITHUB_WORKSPACE}/python-libraries" >> "${GITHUB_ENV}"
+          echo "GROOVEMAP_LIBRARIES_REPO=${GITHUB_WORKSPACE}/python-libraries" >> "${GITHUB_ENV}"
+
+      - name: Install the Rust compiler cache
+        if: (inputs.language == 'rust' && inputs.rust-compiler-cache != 'off') || (inputs.language == 'mixed' && inputs.rust-compiler-cache == 'on')
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Wrap cargo with the Rust compiler cache
+        if: (inputs.language == 'rust' && inputs.rust-compiler-cache != 'off') || (inputs.language == 'mixed' && inputs.rust-compiler-cache == 'on')
+        shell: bash
+        env:
+          SCCACHE_GHA_VERSION: ${{ inputs.sccache-gha-version }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_GHA_ENABLED=true"
+          } >> "${GITHUB_ENV}"
+          if [[ -n "${SCCACHE_GHA_VERSION}" ]]; then
+            echo "SCCACHE_GHA_VERSION=${SCCACHE_GHA_VERSION}" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Install locked dependencies
+        shell: bash
+        run: ${{ inputs.setup-command }}
+
+      - name: Install browser dependencies
+        if: inputs.e2e-setup-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-setup-command }}
+
+      - name: Instrument browser JavaScript
+        if: inputs.e2e-instrument-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-instrument-command }}
+
+      - name: Run browser end-to-end tests
+        shell: bash
+        run: ${{ inputs.e2e-command }}
+
+      - name: Run E2E post-processing and teardown
+        if: always() && inputs.e2e-post-command != ''
+        shell: bash
+        run: ${{ inputs.e2e-post-command }}
+
+      - name: Stage workspace-relative coverage evidence
+        id: stage-coverage
+        if: always() && steps.project-evidence.outcome == 'success'
+        shell: bash
+        env:
+          RETAINED_COVERAGE_PATHS_JSON: ${{ steps.project-evidence.outputs.retained-coverage-paths-json }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path, PurePosixPath
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          staging_root = Path(os.environ["RUNNER_TEMP"]) / "groovemap-coverage-artifact"
+          if staging_root.is_symlink():
+              staging_root.unlink()
+          elif staging_root.exists():
+              shutil.rmtree(staging_root)
+          payload_root = staging_root / "workspace"
+          payload_root.mkdir(parents=True)
+
+          try:
+              retained_paths = json.loads(os.environ["RETAINED_COVERAGE_PATHS_JSON"])
+          except json.JSONDecodeError as error:
+              raise SystemExit("retained coverage paths output must be valid JSON") from error
+          if (
+              not isinstance(retained_paths, list)
+              or not retained_paths
+              or not all(isinstance(path, str) for path in retained_paths)
+              or len(retained_paths) != len(set(retained_paths))
+          ):
+              raise SystemExit("retained coverage paths output must be a nonempty unique string array")
+          archived_paths = []
+
+          def reject_symlinks(source):
+              if source.is_symlink():
+                  raise SystemExit(f"coverage evidence must not contain symlinks: {source.relative_to(workspace)}")
+              if source.is_dir():
+                  for child in sorted(source.iterdir(), key=lambda item: item.name):
+                      reject_symlinks(child)
+
+          def copy_path(source, destination):
+              if source.is_dir():
+                  destination.mkdir(parents=True, exist_ok=True)
+                  for child in sorted(source.iterdir(), key=lambda item: item.name):
+                      copy_path(child, destination / child.name)
+              else:
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  if destination.exists() and not destination.is_file():
+                      raise SystemExit(f"coverage staging collision: {destination.relative_to(payload_root)}")
+                  shutil.copy2(source, destination)
+
+          for retained_path in retained_paths:
+              relative = PurePosixPath(retained_path)
+              source = workspace.joinpath(*relative.parts)
+              cursor = workspace
+              for part in relative.parts:
+                  cursor /= part
+                  if cursor.is_symlink():
+                      raise SystemExit(f"coverage evidence must not traverse symlinks: {retained_path}")
+              resolved_source = source.resolve(strict=False)
+              if not resolved_source.is_relative_to(workspace):
+                  raise SystemExit(f"coverage evidence escapes the workspace: {retained_path}")
+              if not source.exists() and not source.is_symlink():
+                  continue
+              reject_symlinks(source)
+              destination = payload_root.joinpath(*relative.parts)
+              if destination.exists() and source.is_dir() != destination.is_dir():
+                  raise SystemExit(f"coverage staging collision: {retained_path}")
+              copy_path(source, destination)
+              archived_paths.append(retained_path)
+
+          if not archived_paths:
+              raise SystemExit("none of the declared coverage evidence paths exist")
+
+          manifest = {
+              "format": 1,
+              "retained_paths": retained_paths,
+              "archived_paths": archived_paths,
+          }
+          (staging_root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"artifact-root={staging_root}\n")
+          PY
+
+      - name: Retain browser project evidence
+        if: always() && steps.stage-coverage.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ github.event.repository.name }}-e2e-${{ matrix.browser.project }}-${{ github.run_id }}
+          path: ${{ steps.stage-coverage.outputs.artifact-root }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+
+      - name: Remove private Git credentials
+        if: always() && inputs.requires-private-library
+        shell: bash
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: git config --global --remove-section "url.https://x-access-token:${APP_TOKEN}@github.com/" || true
+
   browser-codecov:
     name: Browser coverage (${{ matrix.upload.project }})
     if: always() && inputs.upload-codecov && inputs.browser-coverage-mapping != '' && needs.validate.outputs.browser-mapping-valid == 'true'
-    needs: validate
+    needs: [validate, browser-e2e]
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     strategy:
@@ -969,9 +1242,17 @@ jobs:
         upload: ${{ fromJSON(inputs.browser-coverage-mapping) }}
     steps:
       - name: Download retained coverage evidence
+        if: success() && !inputs.e2e-matrix
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ github.event.repository.name }}-coverage-${{ github.run_id }}
+          path: ${{ runner.temp }}/groovemap-coverage-download
+
+      - name: Download browser project evidence
+        if: success() && inputs.e2e-matrix
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ github.event.repository.name }}-e2e-${{ matrix.upload.project }}-${{ github.run_id }}
           path: ${{ runner.temp }}/groovemap-coverage-download
 
       - name: Restore workspace-relative coverage evidence
@@ -1121,7 +1402,7 @@ jobs:
   result:
     name: Required result
     if: always()
-    needs: [validate, browser-codecov]
+    needs: [validate, browser-e2e, browser-codecov]
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     steps:
@@ -1129,11 +1410,18 @@ jobs:
         shell: bash
         env:
           VALIDATION_RESULT: ${{ needs.validate.result }}
+          BROWSER_E2E_RESULT: ${{ needs.browser-e2e.result }}
           BROWSER_CODECOV_RESULT: ${{ needs.browser-codecov.result }}
           BROWSER_COVERAGE_MAPPING: ${{ inputs.browser-coverage-mapping }}
           UPLOAD_CODECOV: ${{ inputs.upload-codecov }}
+          E2E_MATRIX: ${{ inputs.e2e-matrix }}
         run: |
           test "${VALIDATION_RESULT}" = success
+          if [[ "${E2E_MATRIX}" == "true" ]]; then
+            test "${BROWSER_E2E_RESULT}" = success
+          else
+            test "${BROWSER_E2E_RESULT}" = skipped
+          fi
           if [[ "${UPLOAD_CODECOV}" == "true" && -n "${BROWSER_COVERAGE_MAPPING}" ]]; then
             test "${BROWSER_CODECOV_RESULT}" = success
           else

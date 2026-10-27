@@ -26,6 +26,8 @@ COMMON_DEV_DEPENDENCIES = {
     "ruff>=0.16.4",
 }
 
+BUILD_REQUIREMENTS = {"hatchling>=1.27.0"}
+
 EXPECTED_FAMILY_ORDER = [
     "build-system",
     "project",
@@ -159,6 +161,53 @@ def physical_families(text: str) -> list[str]:
     return families
 
 
+REQUIREMENT = re.compile(r"\s*([A-Z0-9](?:[A-Z0-9._-]*[A-Z0-9])?)\s*(?:\[[^\]]*\])?\s*([^;@]*)", re.IGNORECASE)
+LOWER_BOUND = re.compile(r"^(>=|~=|==|===|>)\s*v?(\d+(?:\.\d+)*)")
+
+
+def normalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def release(version: str) -> tuple[int, ...]:
+    """Numeric release segment as a tuple with trailing zeros dropped, so 1.3 and 1.3.0 compare equal."""
+    parts = [int(part) for part in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def requirement_floor(requirement: object) -> tuple[str, tuple[int, ...] | None] | None:
+    """Return (normalized name, lowest admitted release) for a PEP 508 string; None when unparseable."""
+    if not isinstance(requirement, str):
+        return None
+    match = REQUIREMENT.fullmatch(requirement)
+    if not match:
+        return None
+    floors = []
+    for specifier in match.group(2).split(","):
+        bound = LOWER_BOUND.match(specifier.strip())
+        if bound:
+            floors.append(release(bound.group(2)))
+    return normalize_name(match.group(1)), max(floors) if floors else None
+
+
+def check_floors(errors: list[str], path: Path, label: str, actual: Any, minimums: set[str]) -> None:
+    """Each minimum must be present with a version floor at or above it; a higher floor is allowed."""
+    declared: dict[str, list[tuple[int, ...] | None]] = {}
+    for requirement in actual if isinstance(actual, list) else []:
+        parsed = requirement_floor(requirement)
+        if parsed is not None:
+            declared.setdefault(parsed[0], []).append(parsed[1])
+    for minimum in sorted(minimums):
+        name, floor = requirement_floor(minimum)  # type: ignore[misc]
+        floors = [value for value in declared.get(name, []) if value is not None]
+        if name not in declared:
+            errors.append(f"{path}: {label} missing {minimum!r}")
+        elif not floors or max(floors) < floor:
+            errors.append(f"{path}: {label} must require {minimum!r} or a higher floor; found {sorted(declared[name], key=str)!r}")
+
+
 def check_equal(errors: list[str], path: Path, label: str, actual: Any, expected: Any) -> None:
     if actual != expected:
         errors.append(f"{path}: {label} must be {expected!r}; found {actual!r}")
@@ -218,17 +267,14 @@ def validate_pyproject(path: Path, now: datetime.datetime | None = None) -> tupl
 
     try:
         check_equal(errors, path, "build backend", nested(document, "build-system", "build-backend"), "hatchling.build")
-        check_equal(errors, path, "build requirements", nested(document, "build-system", "requires"), ["hatchling>=1.27.0"])
+        check_floors(errors, path, "build requirements", nested(document, "build-system", "requires"), BUILD_REQUIREMENTS)
 
         project = nested(document, "project")
         requirement = project.get("requires-python")
         if not isinstance(requirement, str) or {part.strip().replace(" ", "") for part in requirement.split(",")} != PYTHON_REQUIREMENT:
             errors.append(f"{path}: project.requires-python must be {PYTHON_REQUIREMENT_TEXT!r}; found {requirement!r}")
 
-        development = set(nested(document, "dependency-groups", "dev"))
-        missing_development = sorted(COMMON_DEV_DEPENDENCIES - development)
-        if missing_development:
-            errors.append(f"{path}: development dependencies missing {missing_development!r}")
+        check_floors(errors, path, "development dependencies", nested(document, "dependency-groups", "dev"), COMMON_DEV_DEPENDENCIES)
 
         nested(document, "tool", "hatch", "build", "targets", "wheel")
         check_equal(errors, path, "uv.exclude-newer", nested(document, "tool", "uv", "exclude-newer"), EXCLUDE_NEWER)
@@ -243,7 +289,10 @@ def validate_pyproject(path: Path, now: datetime.datetime | None = None) -> tupl
         check_equal(errors, path, "ruff.target-version", ruff.get("target-version"), RUFF_TARGET)
         lint = nested(document, "tool", "ruff", "lint")
         check_equal(errors, path, "ruff select rules", lint.get("select"), RUFF_SELECT)
-        check_equal(errors, path, "ruff ignored rules", lint.get("ignore"), RUFF_IGNORE)
+        ignored = lint.get("ignore")
+        missing_ignores = [rule for rule in RUFF_IGNORE if not isinstance(ignored, list) or rule not in ignored]
+        if missing_ignores:
+            errors.append(f"{path}: ruff ignored rules must include {RUFF_IGNORE!r}; missing {missing_ignores!r}")
         isort = nested(document, "tool", "ruff", "lint", "isort")
         check_equal(errors, path, "isort lines-after-imports", isort.get("lines-after-imports"), 2)
         if not isinstance(isort.get("known-first-party"), list) or not isort["known-first-party"]:

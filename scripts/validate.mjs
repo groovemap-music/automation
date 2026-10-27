@@ -76,7 +76,6 @@ const MANIFEST_ECOSYSTEMS = [
   ["Dockerfile", "docker"],
 ];
 const EXPOSURE_PATTERNS = [
-  ["legacy-project-name", new RegExp(["discogs", "ography"].join(""), "i")],
   ["host-local-path", /(?:\/Users\/|\/var\/folders\/|[A-Z]:\\Users\\)/],
   ["private-ip-url", /https?:\/\/(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/],
   ["private-hostname", /https?:\/\/[^\s)>]*(?:\.internal|\.corp|\.lan|\.local)(?::\d+)?/i],

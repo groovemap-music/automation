@@ -26,6 +26,8 @@ COMMON_DEV_DEPENDENCIES = {
     "ruff>=0.16.4",
 }
 
+BUILD_REQUIREMENTS = {"hatchling>=1.27.0"}
+
 EXPECTED_FAMILY_ORDER = [
     "build-system",
     "project",
@@ -42,8 +44,16 @@ EXPECTED_FAMILY_ORDER = [
 RUFF_SELECT = ["ARG", "B", "C4", "E", "F", "I", "PLC", "PTH", "RUF", "S", "SIM", "T20", "TCH", "UP", "W"]
 RUFF_IGNORE = ["B008", "C901", "E501", "S101"]
 
+PYTHON_REQUIREMENT = {">=3.14", "<3.15"}
+PYTHON_REQUIREMENT_TEXT = ">=3.14,<3.15"
+RUFF_TARGET = "py314"
+PYTHON_MINOR = "3.14"
+MISE_PYTHON_PIN = "3.14.7"
+FULL_VERSION = re.compile(r"\d+\.\d+\.\d+")
+MINOR_VERSION = re.compile(r"\d+\.\d+")
+
 MYPY_POLICY = {
-    "python_version": "3.13",
+    "python_version": PYTHON_MINOR,
     "warn_return_any": True,
     "warn_unused_configs": True,
     "disallow_untyped_defs": True,
@@ -151,6 +161,53 @@ def physical_families(text: str) -> list[str]:
     return families
 
 
+REQUIREMENT = re.compile(r"\s*([A-Z0-9](?:[A-Z0-9._-]*[A-Z0-9])?)\s*(?:\[[^\]]*\])?\s*([^;@]*)", re.IGNORECASE)
+LOWER_BOUND = re.compile(r"^(>=|~=|==|===|>)\s*v?(\d+(?:\.\d+)*)")
+
+
+def normalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def release(version: str) -> tuple[int, ...]:
+    """Numeric release segment as a tuple with trailing zeros dropped, so 1.3 and 1.3.0 compare equal."""
+    parts = [int(part) for part in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def requirement_floor(requirement: object) -> tuple[str, tuple[int, ...] | None] | None:
+    """Return (normalized name, lowest admitted release) for a PEP 508 string; None when unparseable."""
+    if not isinstance(requirement, str):
+        return None
+    match = REQUIREMENT.fullmatch(requirement)
+    if not match:
+        return None
+    floors = []
+    for specifier in match.group(2).split(","):
+        bound = LOWER_BOUND.match(specifier.strip())
+        if bound:
+            floors.append(release(bound.group(2)))
+    return normalize_name(match.group(1)), max(floors) if floors else None
+
+
+def check_floors(errors: list[str], path: Path, label: str, actual: Any, minimums: set[str]) -> None:
+    """Each minimum must be present with a version floor at or above it; a higher floor is allowed."""
+    declared: dict[str, list[tuple[int, ...] | None]] = {}
+    for requirement in actual if isinstance(actual, list) else []:
+        parsed = requirement_floor(requirement)
+        if parsed is not None:
+            declared.setdefault(parsed[0], []).append(parsed[1])
+    for minimum in sorted(minimums):
+        name, floor = requirement_floor(minimum)  # type: ignore[misc]
+        floors = [value for value in declared.get(name, []) if value is not None]
+        if name not in declared:
+            errors.append(f"{path}: {label} missing {minimum!r}")
+        elif not floors or max(floors) < floor:
+            errors.append(f"{path}: {label} must require {minimum!r} or a higher floor; found {sorted(declared[name], key=str)!r}")
+
+
 def check_equal(errors: list[str], path: Path, label: str, actual: Any, expected: Any) -> None:
     if actual != expected:
         errors.append(f"{path}: {label} must be {expected!r}; found {actual!r}")
@@ -210,15 +267,14 @@ def validate_pyproject(path: Path, now: datetime.datetime | None = None) -> tupl
 
     try:
         check_equal(errors, path, "build backend", nested(document, "build-system", "build-backend"), "hatchling.build")
-        check_equal(errors, path, "build requirements", nested(document, "build-system", "requires"), ["hatchling>=1.27.0"])
+        check_floors(errors, path, "build requirements", nested(document, "build-system", "requires"), BUILD_REQUIREMENTS)
 
         project = nested(document, "project")
-        check_equal(errors, path, "Python requirement", project.get("requires-python"), ">=3.13")
+        requirement = project.get("requires-python")
+        if not isinstance(requirement, str) or {part.strip().replace(" ", "") for part in requirement.split(",")} != PYTHON_REQUIREMENT:
+            errors.append(f"{path}: project.requires-python must be {PYTHON_REQUIREMENT_TEXT!r}; found {requirement!r}")
 
-        development = set(nested(document, "dependency-groups", "dev"))
-        missing_development = sorted(COMMON_DEV_DEPENDENCIES - development)
-        if missing_development:
-            errors.append(f"{path}: development dependencies missing {missing_development!r}")
+        check_floors(errors, path, "development dependencies", nested(document, "dependency-groups", "dev"), COMMON_DEV_DEPENDENCIES)
 
         nested(document, "tool", "hatch", "build", "targets", "wheel")
         check_equal(errors, path, "uv.exclude-newer", nested(document, "tool", "uv", "exclude-newer"), EXCLUDE_NEWER)
@@ -230,10 +286,13 @@ def validate_pyproject(path: Path, now: datetime.datetime | None = None) -> tupl
 
         ruff = nested(document, "tool", "ruff")
         check_equal(errors, path, "ruff.line-length", ruff.get("line-length"), 150)
-        check_equal(errors, path, "ruff.target-version", ruff.get("target-version"), "py313")
+        check_equal(errors, path, "ruff.target-version", ruff.get("target-version"), RUFF_TARGET)
         lint = nested(document, "tool", "ruff", "lint")
         check_equal(errors, path, "ruff select rules", lint.get("select"), RUFF_SELECT)
-        check_equal(errors, path, "ruff ignored rules", lint.get("ignore"), RUFF_IGNORE)
+        ignored = lint.get("ignore")
+        missing_ignores = [rule for rule in RUFF_IGNORE if not isinstance(ignored, list) or rule not in ignored]
+        if missing_ignores:
+            errors.append(f"{path}: ruff ignored rules must include {RUFF_IGNORE!r}; missing {missing_ignores!r}")
         isort = nested(document, "tool", "ruff", "lint", "isort")
         check_equal(errors, path, "isort lines-after-imports", isort.get("lines-after-imports"), 2)
         if not isinstance(isort.get("known-first-party"), list) or not isort["known-first-party"]:
@@ -277,6 +336,32 @@ def validate_pyproject(path: Path, now: datetime.datetime | None = None) -> tupl
     return errors, warnings
 
 
+def mise_python_findings(path: Path) -> list[str]:
+    """Check the Python pin in a `.mise.toml`; unpinned and non-version declarations are outside the contract."""
+    try:
+        tools = tomllib.loads(path.read_text(encoding="utf-8")).get("tools", {})
+    except tomllib.TOMLDecodeError as error:
+        return [f"{path}: invalid TOML: {error}"]
+    pin = tools.get("python") if isinstance(tools, dict) else None
+    if isinstance(pin, dict):
+        pin = pin.get("version")
+    if not isinstance(pin, str):
+        return []
+    if FULL_VERSION.fullmatch(pin) and pin != MISE_PYTHON_PIN:
+        return [f"{path}: mise tools.python must be {MISE_PYTHON_PIN!r} when patch-pinned; found {pin!r}"]
+    if MINOR_VERSION.fullmatch(pin) and pin != PYTHON_MINOR:
+        return [f"{path}: mise tools.python must be {PYTHON_MINOR!r} (or patch-pinned to {MISE_PYTHON_PIN!r}); found {pin!r}"]
+    return []
+
+
+def discover_mise(root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in root.rglob(".mise.toml")
+        if not any(part in IGNORED_DIRECTORIES for part in path.relative_to(root).parts)
+    )
+
+
 def discover(root: Path) -> list[Path]:
     return sorted(
         path
@@ -298,6 +383,8 @@ def main() -> int:
         errors.extend(path_errors)
         for warning in path_warnings:
             print(annotation("warning", warning, file=path.relative_to(root).as_posix()))
+    for mise_path in discover_mise(root):
+        errors.extend(mise_python_findings(mise_path))
     if errors:
         for error in errors:
             print(error_line(error), file=sys.stderr)

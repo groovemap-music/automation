@@ -366,6 +366,11 @@ toolchain using the pinned mise action and its cache. `.github/actions/validate-
 has no inputs or outputs and applies GrooveMap's shared Python configuration policy with Python
 standard-library code.
 
+The action enforces the Python 3.14 contract from the organization's Python support policy:
+`project.requires-python` equivalent to `>=3.14,<3.15`, Ruff `target-version = "py314"` and Mypy
+`python_version = "3.14"`. It also checks the Python pin in each `.mise.toml`: a patch pin must be
+`3.14.7`, a minor-only pin must be `3.14`, and a repository that does not pin Python is unaffected.
+
 The policy requires `[tool.uv] exclude-newer = "7 days"`. A repository may add
 `[tool.uv.exclude-newer-package]` to admit one fixed release of a package that the window would
 otherwise hold back. Every value must be an RFC 3339 UTC timestamp string in the form

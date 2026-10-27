@@ -30,7 +30,7 @@ build-backend = "hatchling.build"
 [project]
 name = "synthetic"
 version = "0.0.0"
-requires-python = ">=3.13"
+requires-python = ">=3.14,<3.15"
 
 [dependency-groups]
 dev = [{dev}]
@@ -44,7 +44,7 @@ exclude-newer = "{window}"
 
 [tool.ruff]
 line-length = 150
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = {select}
@@ -124,6 +124,43 @@ with tempfile.TemporaryDirectory() as scratch:
 
     errors, warnings = check(directory, render())
     assert errors == [] and warnings == [], (errors, warnings)
+
+    # The Python 3.14 contract: a 3.13 configuration fails with one clear message per setting.
+    old = render().replace('">=3.14,<3.15"', '">=3.13"').replace('"py314"', '"py313"').replace('python_version = "3.14"', 'python_version = "3.13"')
+    errors, _ = check(directory, old)
+    assert len(errors) == 3, errors
+    assert any("project.requires-python must be '>=3.14,<3.15'; found '>=3.13'" in e for e in errors), errors
+    assert any("ruff.target-version must be 'py314'; found 'py313'" in e for e in errors), errors
+    assert any("mypy.python_version must be '3.14'; found '3.13'" in e for e in errors), errors
+    errors, _ = check(directory, render().replace('">=3.14,<3.15"', '">=3.14, <3.15"'))
+    assert errors == [], errors
+    errors, _ = check(directory, render().replace('">=3.14,<3.15"', '">=3.14"'))
+    assert len(errors) == 1 and "requires-python" in errors[0], errors
+
+    # The mise pin: 3.14.7 and unpinned or minor-only 3.14 pass; any other Python pin fails.
+    mise = directory / ".mise.toml"
+    for body, ok in (
+        ('python = "3.14.7"', True),
+        ('python = "3.14"', True),
+        ('python = { version = "3.14.7" }', True),
+        ('just = "1.57.0"', True),
+        ('python = "3.14.6"', False),
+        ('python = "3.13.9"', False),
+        ('python = "3.13"', False),
+        ('python = { version = "3.13.9" }', False),
+    ):
+        mise.write_text(f"[tools]\n{body}\n", encoding="utf-8")
+        found = policy.mise_python_findings(mise)
+        assert (found == []) == ok, (body, found)
+    mise.write_text('[tools]\npython = "3.13.9"\n', encoding="utf-8")
+    assert "mise tools.python must be '3.14.7' when patch-pinned; found '3.13.9'" in policy.mise_python_findings(mise)[0]
+    (directory / "pyproject.toml").write_text(render(), encoding="utf-8")
+    result = subprocess.run(["python3", str(VALIDATOR), str(directory)], check=False, capture_output=True, text=True)
+    assert result.returncode == 1 and ".mise.toml" in result.stderr, (result.stdout, result.stderr)
+    mise.write_text('[tools]\npython = "3.14.7"\n', encoding="utf-8")
+    result = subprocess.run(["python3", str(VALIDATOR), str(directory)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    mise.unlink()
 
     errors, _ = check(directory, render(window="2 days"))
     assert "uv.exclude-newer must be '7 days'; found '2 days'" in only(errors)

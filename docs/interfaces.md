@@ -311,12 +311,16 @@ no branch, schedule, floating tag, or unversioned publication path.
 `buildkit-cache-mounts` is an optional JSON object mapping a BuildKit cache-mount id to its absolute
 container path. A cache mount is builder-local and a hosted runner's builder starts empty, so each
 mapped directory is restored from the Actions cache into `.buildkit-cache/<id>`, injected into the
-named mount before the build, and extracted back afterwards. The cache key combines the mount ids
-with the hash of `dockerfile` and falls back to a mount-id restore-keys prefix; extraction is skipped
-on an exact key hit because the stored cache already reflects that Dockerfile. Each value must equal
-the `--mount=type=cache,target=` path in the caller's Dockerfile, and callers should exclude
-`.buildkit-cache/` from their Docker build context. The input is empty by default, in which case the
-release performs no cache or injection step and keeps the registry layer cache it already used.
+named mount before the build, and extracted back afterwards. The cache key is
+`buildkit-mounts-<ids>-<image-name>-<runner>-<dockerfile-hash>`, combining the sorted mount ids, the
+resolved image name (including any `image-variant` suffix), the slugged `runner`, and the hash of
+`dockerfile`; it falls back to the same key without the Dockerfile hash as its restore-keys prefix,
+so callers that differ only in `image-variant` or `runner` never share an entry. Extraction is
+skipped on an exact key hit because the stored cache already reflects that Dockerfile. Each value
+must equal the `--mount=type=cache,target=` path in the caller's Dockerfile, and callers should
+exclude `.buildkit-cache/` from their Docker build context. The input is empty by default, in which
+case the release performs no cache or injection step and keeps the `type=gha` layer cache it already
+used.
 
 The caller is intentionally small:
 

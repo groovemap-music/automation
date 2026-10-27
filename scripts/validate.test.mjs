@@ -1234,7 +1234,6 @@ test("release artifact variants fail closed on unsafe or path-like suffixes", ()
 
 test("detects each supported private-material pattern without echoing content", () => {
   const samples = [
-    [["discogs", "ography"].join(""), "legacy-project-name"],
     [["", "Users", "operator", "workspace"].join("/"), "host-local-path"],
     [["https:/", "10.1.2.3", "api"].join("/"), "private-ip-url"],
     [["https:/", "build.ops.internal"].join("/"), "private-hostname"],

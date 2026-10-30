@@ -29,12 +29,20 @@ Python callers can also pin the credential-free
 [`validate-database-fixtures`](docs/interfaces.md#composite-actions) composite action to reject new
 unspecced Neo4j and PostgreSQL pytest fixtures before running their repository-owned `just check`.
 
+## Using it from a caller repository
+
+Add a workflow that calls a reusable workflow at a full commit revision, and pass your own
+`just` recipes as inputs. Copy a complete, working caller from the
+[interface guide](docs/interfaces.md): [pull-request CI](docs/interfaces.md#pull-request-ci) and
+[tag release](docs/interfaces.md#tag-release). Your repository must expose the recipes named in the
+[Justfile capability contract](docs/justfile-contract.md).
+
 ## Release image build caching
 
-`.github/workflows/reusable-release.yml` accepts an optional `buildkit-cache-mounts` input: a JSON
-object mapping each BuildKit cache-mount id to its absolute container path. A BuildKit cache mount
-is builder-local and a hosted runner starts with an empty builder, so the mapped directories are
-restored from the Actions cache before the image build and saved after it.
+`reusable-release.yml` accepts an optional `buildkit-cache-mounts` input: a JSON object that maps
+each BuildKit cache-mount id to its absolute container path. Because a hosted runner starts with an
+empty builder, the mapped directories are restored from the Actions cache before the image build
+and saved after it.
 
 ```yaml
       publish-image: true
@@ -46,20 +54,10 @@ restored from the Actions cache before the image build and saved after it.
         }
 ```
 
-Each id becomes the workspace directory `.buildkit-cache/<id>` and each value must match the
-`--mount=type=cache,target=` path in the caller's Dockerfile. The cache key is
-`buildkit-mounts-<ids>-<image-name>-<runner>-<dockerfile-hash>`, where `<ids>` are the sorted mount
-ids, `<image-name>` is the resolved image name (including any `image-variant` suffix), and
-`<runner>` is `inputs.runner` lowercased with every run of non-alphanumeric characters collapsed to
-a single hyphen (for example `ubuntu-24.04` becomes `ubuntu-24-04`). The matching restore-keys
-prefix is `buildkit-mounts-<ids>-<image-name>-<runner>-`, so a compile layer is reused until the
-Dockerfile changes, but two callers that differ only in `image-variant` or `runner` never share or
-collide over the same cache entry. Extraction is skipped on an exact key hit because the stored
-cache already matches that Dockerfile. Callers should exclude `.buildkit-cache/` from their Docker
-build context.
-
-The input is empty by default. `publish-image` builds that omit it keep their existing behaviour:
-no cache step, no injection step, and the same `type=gha` layer cache as before.
+Each value must match the `--mount=type=cache,target=` path in the caller's Dockerfile. The input
+is empty by default, and builds that omit it keep the `type=gha` layer cache and add no cache
+steps. The cache key, restore keys, and build-context advice are in the
+[tag release](docs/interfaces.md#tag-release) section of the interface guide.
 
 ## Rust compiler cache
 
@@ -67,8 +65,7 @@ Callers that build Rust get the `sccache` compiler cache backed by the GitHub Ac
 pull request recompiles only the crates it changed. `reusable-ci.yml` installs the pinned
 `mozilla-actions/sccache-action`, exports `RUSTC_WRAPPER=sccache` and `SCCACHE_GHA_ENABLED=true`
 before the caller's `setup-command`, and always reports `sccache --show-stats` at the end of
-validation. Caller commands remain repository-owned and follow the documented
-[Justfile capability contract](docs/justfile-contract.md).
+validation.
 
 - `rust-compiler-cache` (string, default `auto`) selects the mode. `auto` enables the cache for
   `rust` callers only, `on` also enables it for a `mixed` caller that builds Rust, and `off` disables
